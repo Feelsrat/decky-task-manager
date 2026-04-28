@@ -1,5 +1,6 @@
 import {
   ButtonItem,
+  Focusable,
   Navigation,
   PanelSection,
   PanelSectionRow,
@@ -349,7 +350,7 @@ function Badge({ children, tone = "good" }: { children: ReactNode; tone?: "good"
 }
 
 function EmptyState({ children }: { children: string }) {
-  return <div style={{ ...styles.panel, ...styles.muted }}>{children}</div>;
+  return <Focusable style={{ ...styles.panel, ...styles.muted }}>{children}</Focusable>;
 }
 
 function useViewport() {
@@ -370,7 +371,7 @@ function useViewport() {
 
 function useTaskManager() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
-  const [monitoring, setMonitoring] = useState(true);
+  const [monitoring, setMonitoring] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busyPlugin, setBusyPlugin] = useState<string>();
   const [selectedPlugin, setSelectedPlugin] = useState<string>();
@@ -876,11 +877,11 @@ function UpdatePanel({
 
 function MetricCard({ label, value, detail, tone = "good" }: { label: string; value: string; detail?: string; tone?: "good" | "danger" }) {
   return (
-    <div style={styles.metricCard}>
+    <Focusable style={styles.metricCard}>
       <div style={styles.label}>{label}</div>
       <div style={{ ...styles.value, color: tone === "danger" ? palette.red : palette.text }}>{value}</div>
       {detail && <div style={styles.tiny}>{detail}</div>}
-    </div>
+    </Focusable>
   );
 }
 
@@ -924,13 +925,13 @@ function LogsPanel({
             </ButtonItem>
           </div>
           {detail.groups.slice(0, 10).map((group, index) => (
-            <div key={`${detail.name}-${index}`} style={{ paddingTop: "10px" }}>
+            <Focusable key={`${detail.name}-${index}`} style={{ paddingTop: "10px" }}>
               <div style={styles.row}>
                 <Badge tone={group.count > 5 ? "danger" : "warn"}>{group.count}x</Badge>
                 <span style={styles.tiny}>{group.file}</span>
               </div>
               <div style={styles.examples}>{group.message}</div>
-            </div>
+            </Focusable>
           ))}
         </div>
       )}
@@ -1093,10 +1094,10 @@ function PluginQamRow({
 
 function SmallMetric({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div style={{ ...styles.metricCard, minHeight: "46px", padding: "8px" }}>
+    <Focusable style={{ ...styles.metricCard, minHeight: "46px", padding: "8px" }}>
       <div style={styles.label}>{label}</div>
       <div>{value}</div>
-    </div>
+    </Focusable>
   );
 }
 
