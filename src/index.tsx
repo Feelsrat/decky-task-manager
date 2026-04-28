@@ -2,114 +2,290 @@ import {
   ButtonItem,
   PanelSection,
   PanelSectionRow,
-  Navigation,
-  staticClasses
+  staticClasses,
 } from "@decky/ui";
-import {
-  addEventListener,
-  removeEventListener,
-  callable,
-  definePlugin,
-  toaster,
-  // routerHook
-} from "@decky/api"
-import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+import { callable, definePlugin, toaster } from "@decky/api";
+import { CSSProperties, useEffect, useMemo, useState } from "react";
+import { FaChartBar, FaSyncAlt, FaTasks } from "react-icons/fa";
 
-// import logo from "../assets/logo.png";
-
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
-
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
-
-function Content() {
-  const [result, setResult] = useState<number | undefined>();
-
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
-  };
-
-  return (
-    <PanelSection title="Panel Section">
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
-        </ButtonItem>
-      </PanelSectionRow>
-
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
-        </div>
-      </PanelSectionRow> */}
-
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
-    </PanelSection>
-  );
+type PluginRow = {
+  folder: string;
+  name: string;
+  version: string;
+  author: string;
+  disabled: boolean;
 };
 
+type LogRow = {
+  name: string;
+  folder: string;
+  errors: number;
+  files: number;
+  examples: string[];
+};
+
+type Metrics = {
+  cpu: number;
+  memory: {
+    used: number;
+    total: number;
+    percent: number;
+  };
+};
+
+type Snapshot = {
+  plugins: PluginRow[];
+  logs: {
+    plugins: LogRow[];
+    totals: {
+      errors: number;
+      files: number;
+    };
+  };
+  metrics: Metrics;
+};
+
+type DisableResult = {
+  ok: boolean;
+  message: string;
+  restarted?: boolean;
+};
+
+const getSnapshot = callable<[], Snapshot>("get_snapshot");
+const getMetrics = callable<[], Metrics>("get_metrics");
+const disablePlugin = callable<[name: string], DisableResult>("disable_plugin");
+
+const styles: Record<string, CSSProperties> = {
+  row: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    width: "100%",
+  },
+  stack: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    width: "100%",
+  },
+  muted: {
+    opacity: 0.72,
+    fontSize: "12px",
+    lineHeight: 1.25,
+  },
+  value: {
+    fontSize: "22px",
+    fontWeight: 700,
+    lineHeight: 1,
+  },
+  meter: {
+    height: "8px",
+    width: "100%",
+    borderRadius: "4px",
+    background: "rgba(255, 255, 255, 0.16)",
+    overflow: "hidden",
+  },
+  fill: {
+    height: "100%",
+    borderRadius: "4px",
+    background: "rgb(93, 188, 210)",
+  },
+  pluginCard: {
+    borderTop: "1px solid rgba(255, 255, 255, 0.12)",
+    padding: "10px 0",
+  },
+  status: {
+    minWidth: "78px",
+    textAlign: "right",
+    fontSize: "12px",
+    opacity: 0.8,
+  },
+  example: {
+    opacity: 0.68,
+    fontFamily: "monospace",
+    fontSize: "11px",
+    lineHeight: 1.25,
+    whiteSpace: "normal",
+    wordBreak: "break-word",
+  },
+};
+
+function Meter({ value }: { value: number }) {
+  return (
+    <div style={styles.meter}>
+      <div style={{ ...styles.fill, width: `${Math.max(0, Math.min(100, value))}%` }} />
+    </div>
+  );
+}
+
+function Content() {
+  const [snapshot, setSnapshot] = useState<Snapshot>();
+  const [loading, setLoading] = useState(false);
+  const [busyPlugin, setBusyPlugin] = useState<string>();
+
+  const logRows = useMemo(() => snapshot?.logs.plugins.slice(0, 6) ?? [], [snapshot]);
+  const pluginRows = useMemo(() => snapshot?.plugins ?? [], [snapshot]);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setSnapshot(await getSnapshot());
+    } catch (error) {
+      toaster.toast({
+        title: "Decky Task Manager",
+        body: "Could not read Decky status.",
+      });
+      console.error("[decky-task-manager] refresh failed", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshMetrics = async () => {
+    try {
+      const metrics = await getMetrics();
+      setSnapshot((current) => current ? { ...current, metrics } : current);
+    } catch (error) {
+      toaster.toast({
+        title: "Decky Task Manager",
+        body: "Could not read system metrics.",
+      });
+      console.error("[decky-task-manager] metrics refresh failed", error);
+    }
+  };
+
+  const onDisable = async (name: string) => {
+    setBusyPlugin(name);
+    try {
+      const result = await disablePlugin(name);
+      toaster.toast({
+        title: "Decky Task Manager",
+        body: result.message,
+      });
+
+      if (!result.restarted) {
+        await refresh();
+      }
+    } catch (error) {
+      toaster.toast({
+        title: "Decky Task Manager",
+        body: `Could not disable ${name}.`,
+      });
+      console.error("[decky-task-manager] disable failed", error);
+    } finally {
+      setBusyPlugin(undefined);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  return (
+    <>
+      <PanelSection title="Plugin Errors">
+        <PanelSectionRow>
+          <div style={styles.row}>
+            <div style={styles.stack}>
+              <div style={styles.value}>{snapshot?.logs.totals.errors ?? "-"}</div>
+              <div style={styles.muted}>
+                errors found across {snapshot?.logs.totals.files ?? 0} log files
+              </div>
+            </div>
+            <ButtonItem
+              layout="below"
+              disabled={loading}
+              onClick={refresh}
+            >
+              <FaSyncAlt /> {loading ? "Checking" : "Refresh"}
+            </ButtonItem>
+          </div>
+        </PanelSectionRow>
+
+        {logRows.length === 0 && (
+          <PanelSectionRow>
+            <div style={styles.muted}>No plugin log errors found.</div>
+          </PanelSectionRow>
+        )}
+
+        {logRows.map((plugin) => (
+          <PanelSectionRow key={plugin.name}>
+            <div style={{ ...styles.stack, ...styles.pluginCard }}>
+              <div style={styles.row}>
+                <div>
+                  <div>{plugin.name}</div>
+                  <div style={styles.muted}>{plugin.files} log file{plugin.files === 1 ? "" : "s"}</div>
+                </div>
+                <div style={styles.status}>{plugin.errors} error{plugin.errors === 1 ? "" : "s"}</div>
+              </div>
+              {plugin.examples.slice(0, 2).map((example, index) => (
+                <div style={styles.example} key={`${plugin.name}-${index}`}>
+                  {example}
+                </div>
+              ))}
+            </div>
+          </PanelSectionRow>
+        ))}
+      </PanelSection>
+
+      <PanelSection title="System and Plugins">
+        <PanelSectionRow>
+          <div style={styles.stack}>
+            <div style={styles.row}>
+              <span>CPU</span>
+              <span>{snapshot?.metrics.cpu ?? "-"}%</span>
+            </div>
+            <Meter value={snapshot?.metrics.cpu ?? 0} />
+            <div style={styles.row}>
+              <span>RAM</span>
+              <span>
+                {snapshot?.metrics.memory.percent ?? "-"}%
+              </span>
+            </div>
+            <Meter value={snapshot?.metrics.memory.percent ?? 0} />
+            <div style={styles.muted}>
+              {snapshot?.metrics.memory.used ?? "-"} MB used of {snapshot?.metrics.memory.total ?? "-"} MB
+            </div>
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={refreshMetrics}>
+            <FaChartBar /> Refresh Metrics
+          </ButtonItem>
+        </PanelSectionRow>
+
+        {pluginRows.map((plugin) => (
+          <PanelSectionRow key={plugin.name}>
+            <div style={{ ...styles.row, ...styles.pluginCard }}>
+              <div style={styles.stack}>
+                <div>{plugin.name}</div>
+                <div style={styles.muted}>
+                  {plugin.version ? `v${plugin.version}` : plugin.folder}
+                  {plugin.disabled ? " · disabled" : ""}
+                </div>
+              </div>
+              <ButtonItem
+                layout="below"
+                disabled={plugin.disabled || busyPlugin === plugin.name}
+                onClick={() => onDisable(plugin.name)}
+              >
+                {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : "Disable"}
+              </ButtonItem>
+            </div>
+          </PanelSectionRow>
+        ))}
+      </PanelSection>
+    </>
+  );
+}
+
 export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
-
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
-
-  // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
-    toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
-    });
-  });
-
   return {
-    // The name shown in various decky menus
-    name: "Test Plugin",
-    // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
-    // The content of your plugin's menu
+    name: "Decky Task Manager",
+    titleView: <div className={staticClasses.Title}>Decky Task Manager</div>,
     content: <Content />,
-    // The icon displayed in the plugin list
-    icon: <FaShip />,
-    // The function triggered when your plugin unloads
-    onDismount() {
-      console.log("Unloading")
-      removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
-    },
+    icon: <FaTasks />,
+    onDismount() {},
   };
 });
