@@ -18,10 +18,13 @@ import {
   FaRedo,
   FaStop,
   FaTasks,
+  FaVial,
 } from "react-icons/fa";
 
 const ROUTE = "/decky-task-manager";
 const POLL_MS = 2000;
+
+type PluginFilter = "all" | "errors" | "running" | "spikes" | "disabled";
 
 type PluginMetrics = {
   name: string;
@@ -108,6 +111,7 @@ const getSnapshot = callable<[], Snapshot>("get_snapshot");
 const getMetrics = callable<[], Metrics>("get_metrics");
 const clearLogs = callable<[name?: string], ActionResult>("clear_logs");
 const disablePlugin = callable<[name: string], ActionResult>("disable_plugin");
+const resetMetrics = callable<[], ActionResult>("reset_metrics");
 const checkUpdate = callable<[], UpdateStatus>("check_update");
 const installUpdate = callable<[], UpdateStatus>("install_update");
 
@@ -196,6 +200,15 @@ const styles: Record<string, CSSProperties> = {
     padding: "12px",
     minHeight: "88px",
   },
+  hero: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: "10px",
+    marginBottom: "16px",
+    maxWidth: "1180px",
+    marginLeft: "auto",
+    marginRight: "auto",
+  },
   label: {
     color: palette.muted,
     fontSize: "12px",
@@ -278,6 +291,12 @@ const styles: Record<string, CSSProperties> = {
     gap: "8px",
     justifyContent: "flex-end",
   },
+  filterBar: {
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+    marginTop: "12px",
+  },
 };
 
 function Meter({ value, color = palette.blue }: { value: number; color?: string }) {
@@ -312,6 +331,8 @@ function useTaskManager() {
   const [selectedPlugin, setSelectedPlugin] = useState<string>();
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
   const [updating, setUpdating] = useState(false);
+  const [testingSince, setTestingSince] = useState<number>();
+  const [pendingDisable, setPendingDisable] = useState<string>();
 
   const refresh = async () => {
     setLoading(true);
@@ -349,7 +370,44 @@ function useTaskManager() {
     }
   };
 
+  const onResetMetrics = async () => {
+    try {
+      const result = await resetMetrics();
+      toaster.toast({ title: "Decky Task Manager", body: result.message });
+      await refreshMetrics();
+    } catch (error) {
+      toaster.toast({ title: "Decky Task Manager", body: "Could not reset metric history." });
+      console.error("[decky-task-manager] reset metrics failed", error);
+    }
+  };
+
+  const onStartTest = async () => {
+    setLoading(true);
+    try {
+      await clearLogs();
+      await resetMetrics();
+      setTestingSince(Date.now());
+      setMonitoring(true);
+      await refresh();
+      toaster.toast({ title: "Decky Task Manager", body: "Testing mode started." });
+    } catch (error) {
+      toaster.toast({ title: "Decky Task Manager", body: "Could not start testing mode." });
+      console.error("[decky-task-manager] testing mode failed", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const onDisable = async (name: string) => {
+    if (pendingDisable !== name) {
+      setPendingDisable(name);
+      window.setTimeout(() => {
+        setPendingDisable((current) => current === name ? undefined : current);
+      }, 4500);
+      return;
+    }
+
+    setPendingDisable(undefined);
     setBusyPlugin(name);
     try {
       const result = await disablePlugin(name);
@@ -413,11 +471,15 @@ function useTaskManager() {
     selectedPlugin,
     updateStatus,
     updating,
+    testingSince,
+    pendingDisable,
     setMonitoring,
     setSelectedPlugin,
     refresh,
     refreshMetrics,
     onClearLogs,
+    onResetMetrics,
+    onStartTest,
     onDisable,
     onCheckUpdate,
     onInstallUpdate,
@@ -451,6 +513,7 @@ function emptyPluginMetrics(name: string): PluginMetrics {
 
 function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
   const state = useTaskManager();
+  const [filter, setFilter] = useState<PluginFilter>("all");
   const plugins = useMemo(() => state.snapshot?.plugins ?? [], [state.snapshot]);
   const noisyLogs = useMemo(
     () => state.snapshot?.logs.plugins.filter((plugin) => plugin.errors > 0).slice(0, fullscreen ? 12 : 4) ?? [],
@@ -462,10 +525,15 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
       .sort((a, b) => (b.metrics?.cpu ?? 0) - (a.metrics?.cpu ?? 0) || (b.metrics?.memory ?? 0) - (a.metrics?.memory ?? 0)),
     [plugins],
   );
+  const filteredPlugins = useMemo(
+    () => activePlugins.filter((plugin) => matchesFilter(plugin, filter)),
+    [activePlugins, filter],
+  );
   const selectedLog = useMemo(
     () => state.snapshot?.logs.plugins.find((plugin) => plugin.name === state.selectedPlugin),
     [state.snapshot, state.selectedPlugin],
   );
+  const top = useMemo(() => topSummary(state.snapshot), [state.snapshot]);
 
   if (fullscreen) {
     return (
@@ -475,6 +543,7 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             <div style={styles.title}>Decky Task Manager</div>
             <div style={styles.muted}>
               Live while this page is open. Clear logs, start a fresh watch, then trigger the thing you want to test.
+              {state.testingSince ? ` Testing since ${formatTime(state.testingSince)}.` : ""}
             </div>
           </div>
           <div style={styles.actions}>
@@ -488,6 +557,12 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             <ButtonItem layout="below" disabled={state.loading} onClick={() => state.onClearLogs()}>
               <FaEraser /> Clear Logs
             </ButtonItem>
+            <ButtonItem layout="below" disabled={state.loading} onClick={state.onStartTest}>
+              <FaVial /> Test Mode
+            </ButtonItem>
+            <ButtonItem layout="below" onClick={state.onResetMetrics}>
+              Reset Peaks
+            </ButtonItem>
             <ButtonItem layout="below" disabled={state.updating} onClick={state.onCheckUpdate}>
               <FaDownload /> Check Update
             </ButtonItem>
@@ -499,6 +574,13 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
               <FaDownload /> Install
             </ButtonItem>
           </div>
+        </div>
+
+        <div style={styles.hero}>
+          <MetricCard label="top errors" value={top.errors.value} detail={top.errors.label} tone={top.errors.danger ? "danger" : "good"} />
+          <MetricCard label="top cpu" value={top.cpu.value} detail={top.cpu.label} tone={top.cpu.danger ? "danger" : "good"} />
+          <MetricCard label="top ram" value={top.memory.value} detail={top.memory.label} />
+          <MetricCard label="last updated" value={formatTime(state.snapshot?.metrics.timestamp)} detail={state.monitoring ? "live watch" : "paused"} />
         </div>
 
         <div style={styles.shell}>
@@ -519,8 +601,11 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             />
           </div>
           <PluginTable
-            plugins={activePlugins}
+            plugins={filteredPlugins}
+            filter={filter}
+            onFilter={setFilter}
             busyPlugin={state.busyPlugin}
+            pendingDisable={state.pendingDisable}
             onDisable={state.onDisable}
             onSelectPlugin={state.setSelectedPlugin}
             selectedPlugin={state.selectedPlugin}
@@ -541,6 +626,7 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
               <div style={styles.muted}>
                 {state.snapshot?.metrics.memory.percent ?? "-"}% RAM
                 {state.snapshot?.metrics.spike ? ` · spike: ${state.snapshot.metrics.spikeReason}` : ""}
+                {state.snapshot?.metrics.timestamp ? ` · ${formatTime(state.snapshot.metrics.timestamp)}` : ""}
               </div>
             </div>
             <MonitorButton monitoring={state.monitoring} onClick={() => state.setMonitoring(!state.monitoring)} />
@@ -550,6 +636,9 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
           <div style={styles.row}>
             <ButtonItem layout="below" onClick={openFullscreen}>
               <FaExpand /> Fullscreen
+            </ButtonItem>
+            <ButtonItem layout="below" disabled={state.loading} onClick={state.onStartTest}>
+              <FaVial /> Test
             </ButtonItem>
             <ButtonItem layout="below" disabled={state.loading} onClick={state.refresh}>
               <FaRedo /> Refetch
@@ -620,6 +709,7 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             <PluginQamRow
               plugin={plugin}
               busyPlugin={state.busyPlugin}
+              pendingDisable={state.pendingDisable}
               onDisable={state.onDisable}
             />
           </PanelSectionRow>
@@ -650,7 +740,7 @@ function SystemPanel({ snapshot, monitoring }: { snapshot?: Snapshot; monitoring
         <MetricCard
           label="Watch"
           value={monitoring ? "live" : "paused"}
-          detail={`${activeCount} active plugin${activeCount === 1 ? "" : "s"}`}
+          detail={`${activeCount} active plugin${activeCount === 1 ? "" : "s"} · ${formatTime(metrics?.timestamp)}`}
         />
       </div>
       <div style={{ marginTop: "14px" }}>
@@ -804,14 +894,20 @@ function LogsPanel({
 
 function PluginTable({
   plugins,
+  filter,
+  onFilter,
   busyPlugin,
+  pendingDisable,
   onDisable,
   onSelectPlugin,
   selectedPlugin,
   fullscreen = false,
 }: {
   plugins: PluginRow[];
+  filter: PluginFilter;
+  onFilter(filter: PluginFilter): void;
   busyPlugin?: string;
+  pendingDisable?: string;
   onDisable(name: string): void;
   onSelectPlugin?(name: string): void;
   selectedPlugin?: string;
@@ -825,6 +921,14 @@ function PluginTable({
           <div style={styles.value}>{plugins.length} installed</div>
         </div>
         <Badge>{plugins.filter((plugin) => plugin.metrics?.processes).length} active</Badge>
+      </div>
+
+      <div style={styles.filterBar}>
+        {(["all", "errors", "running", "spikes", "disabled"] as PluginFilter[]).map((item) => (
+          <ButtonItem key={item} layout="below" onClick={() => onFilter(item)}>
+            {filter === item ? "Show " : ""}{item}
+          </ButtonItem>
+        ))}
       </div>
 
       <div style={{ ...styles.pluginRow, color: palette.muted, fontSize: "12px", paddingTop: "16px" }}>
@@ -863,7 +967,7 @@ function PluginTable({
               disabled={plugin.disabled || busyPlugin === plugin.name}
               onClick={() => onDisable(plugin.name)}
             >
-              <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : "Disable"}
+              <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : pendingDisable === plugin.name ? "Sure?" : "Disable"}
             </ButtonItem>
           </Focusable>
         );
@@ -875,10 +979,12 @@ function PluginTable({
 function PluginQamRow({
   plugin,
   busyPlugin,
+  pendingDisable,
   onDisable,
 }: {
   plugin: PluginRow;
   busyPlugin?: string;
+  pendingDisable?: string;
   onDisable(name: string): void;
 }) {
   const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
@@ -895,10 +1001,61 @@ function PluginQamRow({
         disabled={plugin.disabled || busyPlugin === plugin.name}
         onClick={() => onDisable(plugin.name)}
       >
-        Disable
+        {pendingDisable === plugin.name ? "Sure?" : "Disable"}
       </ButtonItem>
     </div>
   );
+}
+
+function matchesFilter(plugin: PluginRow, filter: PluginFilter) {
+  const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
+  const errors = plugin.logs?.errors ?? 0;
+
+  switch (filter) {
+    case "errors":
+      return errors > 0;
+    case "running":
+      return metrics.processes > 0;
+    case "spikes":
+      return metrics.spike;
+    case "disabled":
+      return plugin.disabled;
+    default:
+      return true;
+  }
+}
+
+function topSummary(snapshot?: Snapshot) {
+  const plugins = snapshot?.plugins ?? [];
+  const errors = [...plugins].sort((a, b) => (b.logs?.errors ?? 0) - (a.logs?.errors ?? 0))[0];
+  const cpu = [...plugins].sort((a, b) => (b.metrics?.cpu ?? 0) - (a.metrics?.cpu ?? 0))[0];
+  const memory = [...plugins].sort((a, b) => (b.metrics?.memory ?? 0) - (a.metrics?.memory ?? 0))[0];
+
+  return {
+    errors: {
+      value: `${errors?.logs?.errors ?? 0}`,
+      label: errors?.name ?? "no plugins",
+      danger: (errors?.logs?.errors ?? 0) > 0,
+    },
+    cpu: {
+      value: `${cpu?.metrics?.cpu ?? 0}%`,
+      label: cpu?.name ?? "no plugins",
+      danger: (cpu?.metrics?.spike ?? false),
+    },
+    memory: {
+      value: `${memory?.metrics?.memory ?? 0} MB`,
+      label: memory?.name ?? "no plugins",
+    },
+  };
+}
+
+function formatTime(value?: number) {
+  if (!value) return "-";
+  return new Date(value * (value < 10_000_000_000 ? 1000 : 1)).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 function MetricCell({ value, suffix, spike }: { value: number; suffix: string; spike?: boolean }) {

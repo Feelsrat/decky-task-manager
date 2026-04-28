@@ -21,6 +21,7 @@ ERROR_PATTERN = re.compile(
 )
 MAX_LOG_BYTES = 512 * 1024
 HISTORY_LIMIT = 60
+MAX_ERROR_GROUPS = 50
 SYSTEM_CPU_SPIKE = 85.0
 PLUGIN_CPU_SPIKE = 20.0
 PLUGIN_MEMORY_SPIKE_MB = 250
@@ -77,6 +78,16 @@ class Plugin:
         }
         self._remember(metrics)
         return metrics
+
+    async def reset_metrics(self) -> dict[str, Any]:
+        self._previous_cpu = None
+        self._previous_processes = {}
+        self._history = []
+
+        return {
+            "ok": True,
+            "message": "Reset metric history.",
+        }
 
     async def clear_logs(self, name: str | None = None) -> dict[str, Any]:
         plugins = self._list_plugins()
@@ -299,7 +310,10 @@ class Plugin:
                     "errors": errors,
                     "files": len(paths),
                     "examples": examples,
-                    "groups": sorted(grouped.values(), key=lambda item: (-item["count"], item["message"].lower())),
+                    "groups": sorted(
+                        grouped.values(),
+                        key=lambda item: (-item["count"], item["message"].lower()),
+                    )[:MAX_ERROR_GROUPS],
                 }
             )
 
