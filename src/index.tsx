@@ -1,6 +1,5 @@
 import {
   ButtonItem,
-  Focusable,
   Navigation,
   PanelSection,
   PanelSectionRow,
@@ -186,6 +185,8 @@ const styles: Record<string, CSSProperties> = {
     justifyContent: "space-between",
     gap: "12px",
     width: "100%",
+    minWidth: 0,
+    flexWrap: "wrap",
   },
   stack: {
     display: "flex",
@@ -313,6 +314,12 @@ const styles: Record<string, CSSProperties> = {
     justifyContent: "flex-end",
     minWidth: 0,
   },
+  primaryActions: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(112px, 1fr))",
+    gap: "8px",
+    width: "100%",
+  },
   filterBar: {
     display: "flex",
     gap: "8px",
@@ -343,6 +350,22 @@ function Badge({ children, tone = "good" }: { children: ReactNode; tone?: "good"
 
 function EmptyState({ children }: { children: string }) {
   return <div style={{ ...styles.panel, ...styles.muted }}>{children}</div>;
+}
+
+function useViewport() {
+  const [size, setSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+
+  useEffect(() => {
+    const onResize = () => setSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  return {
+    ...size,
+    compact: size.width < 980,
+    narrow: size.width < 620,
+  };
 }
 
 function useTaskManager() {
@@ -535,6 +558,7 @@ function emptyPluginMetrics(name: string): PluginMetrics {
 
 function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
   const state = useTaskManager();
+  const viewport = useViewport();
   const [filter, setFilter] = useState<PluginFilter>("all");
   const plugins = useMemo(() => state.snapshot?.plugins ?? [], [state.snapshot]);
   const noisyLogs = useMemo(
@@ -558,9 +582,26 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
   const top = useMemo(() => topSummary(state.snapshot), [state.snapshot]);
 
   if (fullscreen) {
+    const heroStyle: CSSProperties = {
+      ...styles.hero,
+      gridTemplateColumns: viewport.narrow
+        ? "1fr"
+        : viewport.compact
+          ? "repeat(2, minmax(0, 1fr))"
+          : "repeat(4, minmax(0, 1fr))",
+    };
+    const shellStyle: CSSProperties = {
+      ...styles.shell,
+      gridTemplateColumns: viewport.compact ? "1fr" : "minmax(0, 360px) minmax(0, 1fr)",
+    };
+    const headerStyle: CSSProperties = {
+      ...styles.header,
+      alignItems: viewport.compact ? "stretch" : "flex-start",
+    };
+
     return (
       <div style={styles.page}>
-        <div style={styles.header}>
+        <div style={headerStyle}>
           <div style={styles.stack}>
             <div style={styles.title}>Decky Task Manager</div>
             <div style={styles.muted}>
@@ -568,7 +609,7 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
               {state.testingSince ? ` Testing since ${formatTime(state.testingSince)}.` : ""}
             </div>
           </div>
-          <div style={styles.actions}>
+          <div style={{ ...styles.primaryActions, maxWidth: viewport.compact ? "none" : "620px" }}>
             <ButtonItem layout="below" onClick={() => Navigation.NavigateBack()}>
               <FaCompress /> Close
             </ButtonItem>
@@ -598,14 +639,14 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
           </div>
         </div>
 
-        <div style={styles.hero}>
+        <div style={heroStyle}>
           <MetricCard label="top errors" value={top.errors.value} detail={top.errors.label} tone={top.errors.danger ? "danger" : "good"} />
           <MetricCard label="top cpu" value={top.cpu.value} detail={top.cpu.label} tone={top.cpu.danger ? "danger" : "good"} />
           <MetricCard label="top ram" value={top.memory.value} detail={top.memory.label} />
           <MetricCard label="last updated" value={formatTime(state.snapshot?.metrics.timestamp)} detail={state.monitoring ? "live watch" : "paused"} />
         </div>
 
-        <div style={styles.shell}>
+        <div style={shellStyle}>
           <div style={styles.stack}>
             <SystemPanel snapshot={state.snapshot} monitoring={state.monitoring} />
             <UpdatePanel
@@ -631,6 +672,7 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             onDisable={state.onDisable}
             onSelectPlugin={state.setSelectedPlugin}
             selectedPlugin={state.selectedPlugin}
+            compact={viewport.compact}
             fullscreen
           />
         </div>
@@ -655,7 +697,7 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <div style={styles.row}>
+          <div style={styles.primaryActions}>
             <ButtonItem layout="below" onClick={openFullscreen}>
               <FaExpand /> Fullscreen
             </ButtonItem>
@@ -930,6 +972,7 @@ function PluginTable({
   onDisable,
   onSelectPlugin,
   selectedPlugin,
+  compact = false,
   fullscreen = false,
 }: {
   plugins: PluginRow[];
@@ -940,6 +983,7 @@ function PluginTable({
   onDisable(name: string): void;
   onSelectPlugin?(name: string): void;
   selectedPlugin?: string;
+  compact?: boolean;
   fullscreen?: boolean;
 }) {
   return (
@@ -963,16 +1007,19 @@ function PluginTable({
       {plugins.map((plugin) => {
         const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
         const isSelected = selectedPlugin === plugin.name;
+        const pluginMetaStyle: CSSProperties = {
+          ...styles.pluginMeta,
+          gridTemplateColumns: compact ? "1fr" : "minmax(0, 1fr) auto",
+        };
         return (
-          <Focusable
+          <div
             style={{
               ...styles.pluginRow,
               background: isSelected ? "rgba(69, 137, 255, 0.12)" : "transparent",
             }}
             key={plugin.name}
-            onActivate={() => onSelectPlugin?.(plugin.name)}
           >
-            <div style={styles.pluginMeta}>
+            <div style={pluginMetaStyle}>
               <div style={styles.stack}>
                 <span>{plugin.name}</span>
                 <span style={styles.tiny}>
@@ -985,19 +1032,24 @@ function PluginTable({
                   {(plugin.logs?.errors ?? 0) > 0 && <Badge tone="warn">{plugin.logs?.errors} errors</Badge>}
                 </div>
               </div>
-              <ButtonItem
-                layout="below"
-                disabled={plugin.disabled || busyPlugin === plugin.name}
-                onClick={() => onDisable(plugin.name)}
-              >
-                <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : pendingDisable === plugin.name ? "Sure?" : "Disable"}
-              </ButtonItem>
+              <div style={styles.primaryActions}>
+                <ButtonItem layout="below" disabled={!onSelectPlugin} onClick={() => onSelectPlugin?.(plugin.name)}>
+                  View Errors
+                </ButtonItem>
+                <ButtonItem
+                  layout="below"
+                  disabled={plugin.disabled || busyPlugin === plugin.name}
+                  onClick={() => onDisable(plugin.name)}
+                >
+                  <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : pendingDisable === plugin.name ? "Sure?" : "Disable"}
+                </ButtonItem>
+              </div>
             </div>
             <div style={styles.metricPair}>
               <SmallMetric label="cpu" value={<MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />} />
               <SmallMetric label="ram" value={<MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />} />
             </div>
-          </Focusable>
+          </div>
         );
       })}
     </div>
