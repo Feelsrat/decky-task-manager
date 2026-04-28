@@ -103,6 +103,7 @@ type UpdateStatus = ActionResult & {
   current?: string;
   latest?: string;
   hasUpdate?: boolean;
+  canInstall?: boolean;
   assetName?: string;
   releaseUrl?: string;
 };
@@ -132,16 +133,17 @@ const palette = {
 const styles: Record<string, CSSProperties> = {
   page: {
     minHeight: "100vh",
-    padding: "28px clamp(18px, 4vw, 44px)",
+    padding: "18px 20px",
     background: palette.bg,
     color: palette.text,
     boxSizing: "border-box",
+    overflowX: "hidden",
   },
   shell: {
     display: "grid",
-    gridTemplateColumns: "minmax(280px, 0.9fr) minmax(420px, 1.5fr)",
-    gap: "16px",
-    maxWidth: "1180px",
+    gridTemplateColumns: "minmax(0, 360px) minmax(0, 1fr)",
+    gap: "12px",
+    maxWidth: "1200px",
     margin: "0 auto",
   },
   qamShell: {
@@ -153,14 +155,17 @@ const styles: Record<string, CSSProperties> = {
     background: palette.panel,
     border: `1px solid ${palette.border}`,
     borderRadius: "8px",
-    padding: "14px",
+    padding: "12px",
+    minWidth: 0,
   },
   header: {
     display: "flex",
     alignItems: "flex-start",
     justifyContent: "space-between",
-    gap: "16px",
-    marginBottom: "16px",
+    gap: "12px",
+    margin: "0 auto 12px",
+    maxWidth: "1200px",
+    flexWrap: "wrap",
   },
   title: {
     fontSize: "26px",
@@ -190,22 +195,23 @@ const styles: Record<string, CSSProperties> = {
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-    gap: "10px",
+    gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))",
+    gap: "8px",
   },
   metricCard: {
     background: palette.panelStrong,
     border: `1px solid ${palette.border}`,
     borderRadius: "8px",
     padding: "12px",
-    minHeight: "88px",
+    minHeight: "76px",
+    minWidth: 0,
   },
   hero: {
     display: "grid",
     gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-    gap: "10px",
-    marginBottom: "16px",
-    maxWidth: "1180px",
+    gap: "8px",
+    marginBottom: "12px",
+    maxWidth: "1200px",
     marginLeft: "auto",
     marginRight: "auto",
   },
@@ -215,9 +221,12 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.2,
   },
   value: {
-    fontSize: "24px",
+    fontSize: "21px",
     fontWeight: 700,
     lineHeight: 1,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   qamValue: {
     fontSize: "20px",
@@ -242,20 +251,32 @@ const styles: Record<string, CSSProperties> = {
     overflow: "hidden",
   },
   pluginRow: {
-    display: "grid",
-    gridTemplateColumns: "minmax(180px, 1.2fr) 96px 96px 86px 104px",
-    alignItems: "center",
+    display: "flex",
+    flexDirection: "column",
     gap: "10px",
-    padding: "10px 0",
+    padding: "12px 0",
     borderTop: `1px solid ${palette.border}`,
+    minWidth: 0,
   },
   qamPluginRow: {
-    display: "grid",
-    gridTemplateColumns: "minmax(0, 1fr) 54px 54px 72px",
-    alignItems: "center",
+    display: "flex",
+    flexDirection: "column",
     gap: "8px",
     padding: "9px 0",
     borderTop: `1px solid ${palette.border}`,
+    minWidth: 0,
+  },
+  metricPair: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: "8px",
+  },
+  pluginMeta: {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+    alignItems: "start",
+    gap: "10px",
+    minWidth: 0,
   },
   badge: {
     display: "inline-flex",
@@ -290,6 +311,7 @@ const styles: Record<string, CSSProperties> = {
     flexWrap: "wrap",
     gap: "8px",
     justifyContent: "flex-end",
+    minWidth: 0,
   },
   filterBar: {
     display: "flex",
@@ -568,10 +590,10 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             </ButtonItem>
             <ButtonItem
               layout="below"
-              disabled={state.updating || !state.updateStatus?.hasUpdate}
+              disabled={state.updating || !state.updateStatus?.canInstall}
               onClick={state.onInstallUpdate}
             >
-              <FaDownload /> Install
+              <FaDownload /> {state.updateStatus?.hasUpdate ? "Install" : "Reinstall"}
             </ButtonItem>
           </div>
         </div>
@@ -664,6 +686,13 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={state.updating} onClick={state.onInstallUpdate}>
               <FaDownload /> Install {state.updateStatus.latest}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {state.updateStatus?.canInstall && !state.updateStatus?.hasUpdate && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={state.updating} onClick={state.onInstallUpdate}>
+              <FaDownload /> Reinstall Latest
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -793,8 +822,8 @@ function UpdatePanel({
           <ButtonItem layout="below" disabled={updating} onClick={onCheckUpdate}>
             <FaDownload /> Check
           </ButtonItem>
-          <ButtonItem layout="below" disabled={updating || !status?.hasUpdate} onClick={onInstallUpdate}>
-            Install
+          <ButtonItem layout="below" disabled={updating || !status?.canInstall} onClick={onInstallUpdate}>
+            {status?.hasUpdate ? "Install" : "Reinstall"}
           </ButtonItem>
         </div>
       </div>
@@ -931,14 +960,6 @@ function PluginTable({
         ))}
       </div>
 
-      <div style={{ ...styles.pluginRow, color: palette.muted, fontSize: "12px", paddingTop: "16px" }}>
-        <span>name</span>
-        <span>cpu</span>
-        <span>ram</span>
-        <span>state</span>
-        <span>action</span>
-      </div>
-
       {plugins.map((plugin) => {
         const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
         const isSelected = selectedPlugin === plugin.name;
@@ -951,24 +972,31 @@ function PluginTable({
             key={plugin.name}
             onActivate={() => onSelectPlugin?.(plugin.name)}
           >
-            <div style={styles.stack}>
-              <span>{plugin.name}</span>
-              <span style={styles.tiny}>
-                {plugin.version ? `v${plugin.version}` : plugin.folder}
-                {metrics.processes ? ` · ${metrics.processes} process${metrics.processes === 1 ? "" : "es"}` : " · idle"}
-              </span>
-              {fullscreen && metrics.spike && <Badge tone="danger">spike: {metrics.spikeReason}</Badge>}
+            <div style={styles.pluginMeta}>
+              <div style={styles.stack}>
+                <span>{plugin.name}</span>
+                <span style={styles.tiny}>
+                  {plugin.version ? `v${plugin.version}` : plugin.folder}
+                  {metrics.processes ? ` · ${metrics.processes} process${metrics.processes === 1 ? "" : "es"}` : " · idle"}
+                </span>
+                <div style={styles.actions}>
+                  <Badge>{plugin.disabled ? "disabled" : metrics.processes ? "running" : "idle"}</Badge>
+                  {fullscreen && metrics.spike && <Badge tone="danger">spike: {metrics.spikeReason}</Badge>}
+                  {(plugin.logs?.errors ?? 0) > 0 && <Badge tone="warn">{plugin.logs?.errors} errors</Badge>}
+                </div>
+              </div>
+              <ButtonItem
+                layout="below"
+                disabled={plugin.disabled || busyPlugin === plugin.name}
+                onClick={() => onDisable(plugin.name)}
+              >
+                <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : pendingDisable === plugin.name ? "Sure?" : "Disable"}
+              </ButtonItem>
             </div>
-            <MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />
-            <MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />
-            <span style={styles.muted}>{plugin.disabled ? "disabled" : metrics.processes ? "running" : "idle"}</span>
-            <ButtonItem
-              layout="below"
-              disabled={plugin.disabled || busyPlugin === plugin.name}
-              onClick={() => onDisable(plugin.name)}
-            >
-              <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : pendingDisable === plugin.name ? "Sure?" : "Disable"}
-            </ButtonItem>
+            <div style={styles.metricPair}>
+              <SmallMetric label="cpu" value={<MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />} />
+              <SmallMetric label="ram" value={<MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />} />
+            </div>
           </Focusable>
         );
       })}
@@ -990,19 +1018,32 @@ function PluginQamRow({
   const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
   return (
     <div style={styles.qamPluginRow}>
-      <div style={styles.stack}>
-        <span>{plugin.name}</span>
-        <span style={styles.tiny}>{plugin.disabled ? "disabled" : metrics.processes ? "running" : "idle"}</span>
+      <div style={styles.pluginMeta}>
+        <div style={styles.stack}>
+          <span>{plugin.name}</span>
+          <span style={styles.tiny}>{plugin.disabled ? "disabled" : metrics.processes ? "running" : "idle"}</span>
+        </div>
+        <ButtonItem
+          layout="below"
+          disabled={plugin.disabled || busyPlugin === plugin.name}
+          onClick={() => onDisable(plugin.name)}
+        >
+          {pendingDisable === plugin.name ? "Sure?" : "Disable"}
+        </ButtonItem>
       </div>
-      <MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />
-      <MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />
-      <ButtonItem
-        layout="below"
-        disabled={plugin.disabled || busyPlugin === plugin.name}
-        onClick={() => onDisable(plugin.name)}
-      >
-        {pendingDisable === plugin.name ? "Sure?" : "Disable"}
-      </ButtonItem>
+      <div style={styles.metricPair}>
+        <SmallMetric label="cpu" value={<MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />} />
+        <SmallMetric label="ram" value={<MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />} />
+      </div>
+    </div>
+  );
+}
+
+function SmallMetric({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div style={{ ...styles.metricCard, minHeight: "46px", padding: "8px" }}>
+      <div style={styles.label}>{label}</div>
+      <div>{value}</div>
     </div>
   );
 }

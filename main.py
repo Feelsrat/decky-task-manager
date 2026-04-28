@@ -159,21 +159,25 @@ class Plugin:
             return {
                 "ok": False,
                 "current": current,
-                "message": "Could not read GitHub releases.",
+                "hasUpdate": False,
+                "canInstall": False,
+                "message": "Could not read GitHub releases. The repo must be public and reachable.",
             }
 
         latest = str(release.get("tag_name", "")).removeprefix("v")
         asset = self._release_asset(release)
         has_update = bool(latest and latest != current and asset)
+        can_install = bool(asset)
 
         return {
             "ok": True,
             "current": current,
             "latest": latest,
             "hasUpdate": has_update,
+            "canInstall": can_install,
             "assetName": asset.get("name") if asset else "",
             "releaseUrl": release.get("html_url", ""),
-            "message": "Update available." if has_update else "No update found.",
+            "message": "Update available." if has_update else "Latest release is already installed.",
         }
 
     async def install_update(self) -> dict[str, Any]:
@@ -181,11 +185,11 @@ class Plugin:
         if not status.get("ok"):
             return status
 
-        if not status.get("hasUpdate"):
+        if not status.get("canInstall"):
             return {
                 **status,
                 "ok": False,
-                "message": "No update found.",
+                "message": "No release zip was found.",
             }
 
         release = self._latest_release()
@@ -638,10 +642,11 @@ class Plugin:
             with urllib.request.urlopen(request, timeout=30) as response:
                 archive_path.write_bytes(response.read())
 
+            extract_dir = temp_path / "extract"
             with zipfile.ZipFile(archive_path) as archive:
-                archive.extractall(temp_path / "extract")
+                self._safe_extract(archive, extract_dir)
 
-            extracted_plugin = self._find_extracted_plugin(temp_path / "extract")
+            extracted_plugin = self._find_extracted_plugin(extract_dir)
             if extracted_plugin is None:
                 raise ValueError("release zip did not contain a Decky plugin")
 
@@ -672,6 +677,17 @@ class Plugin:
             if (candidate / "plugin.json").exists() and (candidate / "package.json").exists():
                 return candidate
         return None
+
+    def _safe_extract(self, archive: zipfile.ZipFile, target: Path) -> None:
+        target.mkdir(parents=True, exist_ok=True)
+        resolved_target = target.resolve()
+
+        for member in archive.infolist():
+            destination = (target / member.filename).resolve()
+            if resolved_target not in [destination, *destination.parents]:
+                raise ValueError("release zip contains an unsafe path")
+
+        archive.extractall(target)
 
     def _schedule_loader_restart(self) -> bool:
         command = (
