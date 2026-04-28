@@ -2,8 +2,13 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +24,7 @@ HISTORY_LIMIT = 60
 SYSTEM_CPU_SPIKE = 85.0
 PLUGIN_CPU_SPIKE = 20.0
 PLUGIN_MEMORY_SPIKE_MB = 250
+GITHUB_RELEASES_URL = "https://api.github.com/repos/Feelsrat/decky-task-manager/releases"
 
 
 class Plugin:
@@ -133,6 +139,69 @@ class Plugin:
             "ok": True,
             "message": f"{name} is disabled.",
             "restarted": restarted,
+        }
+
+    async def check_update(self) -> dict[str, Any]:
+        current = self._current_version()
+        release = self._latest_release()
+        if release is None:
+            return {
+                "ok": False,
+                "current": current,
+                "message": "Could not read GitHub releases.",
+            }
+
+        latest = str(release.get("tag_name", "")).removeprefix("v")
+        asset = self._release_asset(release)
+        has_update = bool(latest and latest != current and asset)
+
+        return {
+            "ok": True,
+            "current": current,
+            "latest": latest,
+            "hasUpdate": has_update,
+            "assetName": asset.get("name") if asset else "",
+            "releaseUrl": release.get("html_url", ""),
+            "message": "Update available." if has_update else "No update found.",
+        }
+
+    async def install_update(self) -> dict[str, Any]:
+        status = await self.check_update()
+        if not status.get("ok"):
+            return status
+
+        if not status.get("hasUpdate"):
+            return {
+                **status,
+                "ok": False,
+                "message": "No update found.",
+            }
+
+        release = self._latest_release()
+        asset = self._release_asset(release or {})
+        if asset is None:
+            return {
+                **status,
+                "ok": False,
+                "message": "No release zip was found.",
+            }
+
+        try:
+            self._install_release_zip(str(asset["browser_download_url"]))
+        except (OSError, ValueError, urllib.error.URLError, zipfile.BadZipFile) as error:
+            decky.logger.exception("Update failed: %s", error)
+            return {
+                **status,
+                "ok": False,
+                "message": "Update failed while installing the release zip.",
+            }
+
+        restarted = self._schedule_loader_restart()
+        return {
+            **status,
+            "ok": True,
+            "restarted": restarted,
+            "message": f"Installed {status.get('latest')}. Decky Loader will restart.",
         }
 
     def _merge_plugin_data(
@@ -498,6 +567,97 @@ class Plugin:
             return ""
 
         return str(package.get("version", ""))
+
+    def _current_version(self) -> str:
+        package_path = Path(decky.DECKY_PLUGIN_DIR) / "package.json"
+        return self._package_version(package_path)
+
+    def _latest_release(self) -> dict[str, Any] | None:
+        request = urllib.request.Request(
+            GITHUB_RELEASES_URL,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "decky-task-manager",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                releases = json.loads(response.read().decode("utf-8"))
+        except (OSError, json.JSONDecodeError, urllib.error.URLError):
+            return None
+
+        if not isinstance(releases, list):
+            return None
+
+        for release in releases:
+            if release.get("draft"):
+                continue
+            if self._release_asset(release):
+                return release
+
+        return None
+
+    def _release_asset(self, release: dict[str, Any]) -> dict[str, Any] | None:
+        assets = release.get("assets", [])
+        if not isinstance(assets, list):
+            return None
+
+        for asset in assets:
+            name = str(asset.get("name", ""))
+            if name.endswith(".zip") and "decky-task-manager" in name:
+                return asset
+
+        return None
+
+    def _install_release_zip(self, url: str) -> None:
+        plugin_dir = Path(decky.DECKY_PLUGIN_DIR)
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "decky-task-manager"},
+        )
+
+        with tempfile.TemporaryDirectory(prefix="decky-task-manager-update-") as temp_root:
+            temp_path = Path(temp_root)
+            archive_path = temp_path / "release.zip"
+
+            with urllib.request.urlopen(request, timeout=30) as response:
+                archive_path.write_bytes(response.read())
+
+            with zipfile.ZipFile(archive_path) as archive:
+                archive.extractall(temp_path / "extract")
+
+            extracted_plugin = self._find_extracted_plugin(temp_path / "extract")
+            if extracted_plugin is None:
+                raise ValueError("release zip did not contain a Decky plugin")
+
+            backup_dir = plugin_dir.with_name(f"{plugin_dir.name}.previous")
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+
+            if plugin_dir.exists():
+                shutil.copytree(plugin_dir, backup_dir, ignore=shutil.ignore_patterns("*.log"))
+
+            for item in extracted_plugin.iterdir():
+                target = plugin_dir / item.name
+                if target.exists():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+
+                if item.is_dir():
+                    shutil.copytree(item, target)
+                else:
+                    shutil.copy2(item, target)
+
+    def _find_extracted_plugin(self, root: Path) -> Path | None:
+        for candidate in [root, *root.iterdir()]:
+            if not candidate.is_dir():
+                continue
+            if (candidate / "plugin.json").exists() and (candidate / "package.json").exists():
+                return candidate
+        return None
 
     def _schedule_loader_restart(self) -> bool:
         command = (

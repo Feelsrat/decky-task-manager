@@ -13,6 +13,7 @@ import {
   FaCompress,
   FaEraser,
   FaExpand,
+  FaDownload,
   FaPlay,
   FaRedo,
   FaStop,
@@ -95,10 +96,20 @@ type ActionResult = {
   failed?: number;
 };
 
+type UpdateStatus = ActionResult & {
+  current?: string;
+  latest?: string;
+  hasUpdate?: boolean;
+  assetName?: string;
+  releaseUrl?: string;
+};
+
 const getSnapshot = callable<[], Snapshot>("get_snapshot");
 const getMetrics = callable<[], Metrics>("get_metrics");
 const clearLogs = callable<[name?: string], ActionResult>("clear_logs");
 const disablePlugin = callable<[name: string], ActionResult>("disable_plugin");
+const checkUpdate = callable<[], UpdateStatus>("check_update");
+const installUpdate = callable<[], UpdateStatus>("install_update");
 
 const palette = {
   bg: "rgb(15, 18, 22)",
@@ -299,6 +310,8 @@ function useTaskManager() {
   const [loading, setLoading] = useState(false);
   const [busyPlugin, setBusyPlugin] = useState<string>();
   const [selectedPlugin, setSelectedPlugin] = useState<string>();
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
+  const [updating, setUpdating] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
@@ -353,6 +366,34 @@ function useTaskManager() {
     }
   };
 
+  const onCheckUpdate = async () => {
+    setUpdating(true);
+    try {
+      const result = await checkUpdate();
+      setUpdateStatus(result);
+      toaster.toast({ title: "Decky Task Manager", body: result.message });
+    } catch (error) {
+      toaster.toast({ title: "Decky Task Manager", body: "Could not check GitHub releases." });
+      console.error("[decky-task-manager] update check failed", error);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const onInstallUpdate = async () => {
+    setUpdating(true);
+    try {
+      const result = await installUpdate();
+      setUpdateStatus(result);
+      toaster.toast({ title: "Decky Task Manager", body: result.message });
+    } catch (error) {
+      toaster.toast({ title: "Decky Task Manager", body: "Could not install update." });
+      console.error("[decky-task-manager] update install failed", error);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
   useEffect(() => {
     refresh();
   }, []);
@@ -370,12 +411,16 @@ function useTaskManager() {
     loading,
     busyPlugin,
     selectedPlugin,
+    updateStatus,
+    updating,
     setMonitoring,
     setSelectedPlugin,
     refresh,
     refreshMetrics,
     onClearLogs,
     onDisable,
+    onCheckUpdate,
+    onInstallUpdate,
   };
 }
 
@@ -443,12 +488,28 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             <ButtonItem layout="below" disabled={state.loading} onClick={() => state.onClearLogs()}>
               <FaEraser /> Clear Logs
             </ButtonItem>
+            <ButtonItem layout="below" disabled={state.updating} onClick={state.onCheckUpdate}>
+              <FaDownload /> Check Update
+            </ButtonItem>
+            <ButtonItem
+              layout="below"
+              disabled={state.updating || !state.updateStatus?.hasUpdate}
+              onClick={state.onInstallUpdate}
+            >
+              <FaDownload /> Install
+            </ButtonItem>
           </div>
         </div>
 
         <div style={styles.shell}>
           <div style={styles.stack}>
             <SystemPanel snapshot={state.snapshot} monitoring={state.monitoring} />
+            <UpdatePanel
+              status={state.updateStatus}
+              updating={state.updating}
+              onCheckUpdate={state.onCheckUpdate}
+              onInstallUpdate={state.onInstallUpdate}
+            />
             <LogsPanel
               rows={noisyLogs}
               snapshot={state.snapshot}
@@ -495,6 +556,28 @@ function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
             </ButtonItem>
           </div>
         </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={styles.row}>
+            <div style={styles.stack}>
+              <span>GitHub update</span>
+              <span style={styles.muted}>
+                {state.updateStatus?.hasUpdate
+                  ? `${state.updateStatus.latest} available`
+                  : state.updateStatus?.message ?? "manual check"}
+              </span>
+            </div>
+            <ButtonItem layout="below" disabled={state.updating} onClick={state.onCheckUpdate}>
+              Check
+            </ButtonItem>
+          </div>
+        </PanelSectionRow>
+        {state.updateStatus?.hasUpdate && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={state.updating} onClick={state.onInstallUpdate}>
+              <FaDownload /> Install {state.updateStatus.latest}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       <PanelSection title="Plugin Errors">
@@ -589,6 +672,43 @@ function SystemPanel({ snapshot, monitoring }: { snapshot?: Snapshot; monitoring
           <Badge tone="danger">spike: {metrics.spikeReason}</Badge>
         </div>
       )}
+    </div>
+  );
+}
+
+function UpdatePanel({
+  status,
+  updating,
+  onCheckUpdate,
+  onInstallUpdate,
+}: {
+  status?: UpdateStatus;
+  updating: boolean;
+  onCheckUpdate(): void;
+  onInstallUpdate(): void;
+}) {
+  return (
+    <div style={styles.panel}>
+      <div style={styles.row}>
+        <div style={styles.stack}>
+          <div style={styles.sectionTitle}>Updates</div>
+          <div style={styles.value}>
+            {status?.hasUpdate ? `${status.latest} ready` : status?.current ? `v${status.current}` : "GitHub"}
+          </div>
+          <div style={styles.muted}>
+            {status?.message ?? "Checks the latest GitHub release and installs the Decky zip."}
+          </div>
+        </div>
+        <div style={styles.actions}>
+          <ButtonItem layout="below" disabled={updating} onClick={onCheckUpdate}>
+            <FaDownload /> Check
+          </ButtonItem>
+          <ButtonItem layout="below" disabled={updating || !status?.hasUpdate} onClick={onInstallUpdate}>
+            Install
+          </ButtonItem>
+        </div>
+      </div>
+      {status?.assetName && <div style={{ ...styles.tiny, marginTop: "8px" }}>{status.assetName}</div>}
     </div>
   );
 }

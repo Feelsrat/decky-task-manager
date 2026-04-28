@@ -7,7 +7,7 @@ It has two main areas:
 - Plugin errors: scans Decky plugin logs, groups similar error lines, and lets you clear logs before testing something again.
 - System and plugins: shows CPU and RAM, maps usage back to plugin processes where Decky exposes enough info, and keeps the disable button beside each plugin.
 
-There is also a fullscreen view if the QAM feels too cramped. Live monitoring only runs while the panel or fullscreen page is open and switched on.
+There is also a fullscreen view if the QAM feels too cramped. Live monitoring only runs while the panel or fullscreen page is open and switched on. Updates can be checked and installed from GitHub releases once the repo is public.
 
 ## Why
 
