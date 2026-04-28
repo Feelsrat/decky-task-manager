@@ -4,10 +4,10 @@ Decky Task Manager is a small Decky Loader plugin for checking what the rest of 
 
 It has two main areas:
 
-- Plugin errors: scans Decky plugin logs when you press refresh and counts lines that look like errors, exceptions, tracebacks, failures, or crashes.
-- System and plugins: shows a quick CPU and RAM snapshot, lists installed Decky plugins, and gives you a disable button for each one.
+- Plugin errors: scans Decky plugin logs, groups similar error lines, and lets you clear logs before testing something again.
+- System and plugins: shows CPU and RAM, maps usage back to plugin processes where Decky exposes enough info, and keeps the disable button beside each plugin.
 
-Nothing in here runs as a background service. It only reads logs, reads `/proc`, or updates Decky settings when you open the panel or press a button.
+There is also a fullscreen view if the QAM feels too cramped. Live monitoring only runs while the panel or fullscreen page is open and switched on.
 
 ## Why
 

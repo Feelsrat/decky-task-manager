@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,18 @@ ERROR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MAX_LOG_BYTES = 512 * 1024
+HISTORY_LIMIT = 60
+SYSTEM_CPU_SPIKE = 85.0
+PLUGIN_CPU_SPIKE = 20.0
+PLUGIN_MEMORY_SPIKE_MB = 250
 
 
 class Plugin:
+    def __init__(self):
+        self._previous_cpu: tuple[int, int] | None = None
+        self._previous_processes: dict[int, int] = {}
+        self._history: list[dict[str, Any]] = []
+
     async def _main(self):
         decky.logger.info("Decky Task Manager loaded")
 
@@ -35,19 +45,55 @@ class Plugin:
         metrics = await self.get_metrics()
 
         return {
-            "plugins": plugins,
+            "plugins": self._merge_plugin_data(plugins, logs, metrics),
             "logs": logs,
             "metrics": metrics,
         }
 
     async def get_metrics(self) -> dict[str, Any]:
         first = self._read_cpu_times()
-        await asyncio.sleep(0.15)
-        second = self._read_cpu_times()
+        if self._previous_cpu is None:
+            await asyncio.sleep(0.15)
+            first = self._read_cpu_times()
+
+        processes = self._read_plugin_processes(self._list_plugins())
+        now = time.time()
+        metrics = {
+            "timestamp": now,
+            "cpu": self._cpu_percent(self._previous_cpu or first, first),
+            "memory": self._read_memory(),
+            "plugins": self._plugin_metrics(processes, first),
+        }
+
+        self._previous_cpu = first
+        self._previous_processes = {
+            process["pid"]: process["cpu_time"] for process in processes
+        }
+        self._remember(metrics)
+        return metrics
+
+    async def clear_logs(self, name: str | None = None) -> dict[str, Any]:
+        plugins = self._list_plugins()
+        wanted = {name} if name else {plugin["name"] for plugin in plugins}
+        cleared = 0
+        failed = 0
+
+        for plugin in plugins:
+            if plugin["name"] not in wanted:
+                continue
+
+            for log_path in self._log_paths_for_plugin(Path(decky.DECKY_HOME) / "logs", plugin):
+                try:
+                    log_path.write_text("", encoding="utf-8")
+                    cleared += 1
+                except OSError:
+                    failed += 1
 
         return {
-            "cpu": self._cpu_percent(first, second),
-            "memory": self._read_memory(),
+            "ok": failed == 0,
+            "cleared": cleared,
+            "failed": failed,
+            "message": f"Cleared {cleared} log file{'s' if cleared != 1 else ''}.",
         }
 
     async def disable_plugin(self, name: str) -> dict[str, Any]:
@@ -88,6 +134,27 @@ class Plugin:
             "message": f"{name} is disabled.",
             "restarted": restarted,
         }
+
+    def _merge_plugin_data(
+        self,
+        plugins: list[dict[str, Any]],
+        logs: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        log_map = {row["name"]: row for row in logs["plugins"]}
+        metric_map = {row["name"]: row for row in metrics["plugins"]}
+        rows: list[dict[str, Any]] = []
+
+        for plugin in plugins:
+            rows.append(
+                {
+                    **plugin,
+                    "logs": log_map.get(plugin["name"], {}),
+                    "metrics": metric_map.get(plugin["name"], {}),
+                }
+            )
+
+        return rows
 
     def _list_plugins(self) -> list[dict[str, Any]]:
         plugin_dir = Path(decky.DECKY_HOME) / "plugins"
@@ -131,12 +198,25 @@ class Plugin:
             paths = self._log_paths_for_plugin(log_root, plugin)
             errors = 0
             examples: list[str] = []
+            grouped: dict[str, dict[str, Any]] = {}
 
             for log_path in paths:
                 lines = self._tail_lines(log_path)
                 file_errors = [line.strip() for line in lines if ERROR_PATTERN.search(line)]
                 errors += len(file_errors)
                 totals["files"] += 1
+
+                for line in file_errors:
+                    key = self._normalize_error(line)
+                    current = grouped.setdefault(
+                        key,
+                        {
+                            "message": line[-260:],
+                            "count": 0,
+                            "file": str(log_path.relative_to(log_root)),
+                        },
+                    )
+                    current["count"] += 1
 
                 for line in file_errors[-3:]:
                     if len(examples) < 3:
@@ -150,6 +230,7 @@ class Plugin:
                     "errors": errors,
                     "files": len(paths),
                     "examples": examples,
+                    "groups": sorted(grouped.values(), key=lambda item: (-item["count"], item["message"].lower())),
                 }
             )
 
@@ -190,6 +271,13 @@ class Plugin:
 
         return data.decode("utf-8", errors="replace").splitlines()
 
+    def _normalize_error(self, line: str) -> str:
+        clean = re.sub(r"\d{4}-\d{2}-\d{2}[tT ][\d:.+-]+", "", line)
+        clean = re.sub(r"\b\d+\b", "#", clean)
+        clean = re.sub(r"0x[0-9a-fA-F]+", "0x#", clean)
+        clean = re.sub(r"\s+", " ", clean)
+        return clean.strip().lower()[-220:]
+
     def _read_cpu_times(self) -> tuple[int, int]:
         try:
             with open("/proc/stat", "r", encoding="utf-8") as proc_stat:
@@ -202,9 +290,164 @@ class Plugin:
         total = sum(values)
         return (idle, total)
 
-    def _cpu_percent(self, first: tuple[int, int], second: tuple[int, int]) -> float:
-        idle_delta = second[0] - first[0]
-        total_delta = second[1] - first[1]
+    def _read_plugin_processes(self, plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        plugin_names = {plugin["name"]: plugin for plugin in plugins}
+        plugin_folders = {plugin["folder"]: plugin for plugin in plugins}
+        processes: list[dict[str, Any]] = []
+
+        for proc_path in Path("/proc").iterdir():
+            if not proc_path.name.isdigit():
+                continue
+
+            try:
+                stat = (proc_path / "stat").read_text(encoding="utf-8")
+                status = (proc_path / "status").read_text(encoding="utf-8")
+                cmdline = (proc_path / "cmdline").read_text(encoding="utf-8", errors="replace")
+                environ = (proc_path / "environ").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            plugin = self._process_plugin(stat, cmdline, environ, plugin_names, plugin_folders)
+            if plugin is None:
+                continue
+
+            fields = stat.rsplit(") ", 1)[1].split()
+            cpu_time = int(fields[11]) + int(fields[12])
+            rss = self._status_value(status, "VmRSS")
+
+            processes.append(
+                {
+                    "pid": int(proc_path.name),
+                    "name": plugin["name"],
+                    "cpu_time": cpu_time,
+                    "rss": rss,
+                }
+            )
+
+        return processes
+
+    def _process_plugin(
+        self,
+        stat: str,
+        cmdline: str,
+        environ: str,
+        plugin_names: dict[str, dict[str, Any]],
+        plugin_folders: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for entry in environ.split("\x00"):
+            if entry.startswith("DECKY_PLUGIN_NAME="):
+                return plugin_names.get(entry.split("=", 1)[1])
+            if entry.startswith("DECKY_PLUGIN_DIR="):
+                folder = Path(entry.split("=", 1)[1]).name
+                return plugin_folders.get(folder)
+
+        process_title = stat.split("(", 1)[1].rsplit(")", 1)[0]
+        haystack = f"{process_title}\x00{cmdline}".lower()
+
+        for plugin in plugin_names.values():
+            if plugin["name"].lower() in haystack or plugin["folder"].lower() in haystack:
+                return plugin
+
+        return None
+
+    def _plugin_metrics(
+        self,
+        processes: list[dict[str, Any]],
+        current_cpu: tuple[int, int],
+    ) -> list[dict[str, Any]]:
+        total_delta = current_cpu[1] - self._previous_cpu[1] if self._previous_cpu else 0
+        grouped: dict[str, dict[str, Any]] = {}
+
+        for process in processes:
+            row = grouped.setdefault(
+                process["name"],
+                {
+                    "name": process["name"],
+                    "cpu": 0.0,
+                    "memory": 0,
+                    "processes": 0,
+                    "peakCpu": 0.0,
+                    "peakMemory": 0,
+                    "spike": False,
+                    "spikeReason": "",
+                },
+            )
+            previous = self._previous_processes.get(process["pid"], process["cpu_time"])
+            process_delta = max(process["cpu_time"] - previous, 0)
+
+            if total_delta > 0:
+                row["cpu"] += (process_delta / total_delta) * 100
+
+            row["memory"] += round(process["rss"] / 1024)
+            row["processes"] += 1
+
+        history_peaks = self._plugin_history_peaks()
+        for row in grouped.values():
+            row["cpu"] = round(row["cpu"], 1)
+            row["peakCpu"] = max(row["cpu"], history_peaks.get(row["name"], {}).get("cpu", 0.0))
+            row["peakMemory"] = max(row["memory"], history_peaks.get(row["name"], {}).get("memory", 0))
+
+            cpu_spike = row["cpu"] >= PLUGIN_CPU_SPIKE and row["cpu"] >= row["peakCpu"] * 0.85
+            memory_spike = row["memory"] >= row["peakMemory"] + PLUGIN_MEMORY_SPIKE_MB
+
+            if cpu_spike:
+                row["spike"] = True
+                row["spikeReason"] = "cpu"
+            elif memory_spike:
+                row["spike"] = True
+                row["spikeReason"] = "ram"
+
+        return sorted(grouped.values(), key=lambda item: (-item["cpu"], -item["memory"], item["name"].lower()))
+
+    def _remember(self, metrics: dict[str, Any]) -> None:
+        system_spike = metrics["cpu"] >= SYSTEM_CPU_SPIKE
+        metrics["spike"] = system_spike or any(plugin["spike"] for plugin in metrics["plugins"])
+
+        if system_spike:
+            metrics["spikeReason"] = "system cpu"
+        else:
+            metrics["spikeReason"] = next(
+                (plugin["spikeReason"] for plugin in metrics["plugins"] if plugin["spike"]),
+                "",
+            )
+
+        self._history.append(
+            {
+                "timestamp": metrics["timestamp"],
+                "cpu": metrics["cpu"],
+                "memory": metrics["memory"]["percent"],
+                "plugins": [
+                    {
+                        "name": plugin["name"],
+                        "cpu": plugin["cpu"],
+                        "memory": plugin["memory"],
+                    }
+                    for plugin in metrics["plugins"]
+                ],
+            }
+        )
+        self._history = self._history[-HISTORY_LIMIT:]
+        metrics["history"] = self._history
+
+    def _plugin_history_peaks(self) -> dict[str, dict[str, float]]:
+        peaks: dict[str, dict[str, float]] = {}
+        for point in self._history:
+            for plugin in point["plugins"]:
+                row = peaks.setdefault(plugin["name"], {"cpu": 0.0, "memory": 0.0})
+                row["cpu"] = max(row["cpu"], plugin["cpu"])
+                row["memory"] = max(row["memory"], plugin["memory"])
+        return peaks
+
+    def _status_value(self, status: str, key: str) -> int:
+        for line in status.splitlines():
+            if line.startswith(f"{key}:"):
+                parts = line.split()
+                return int(parts[1]) if len(parts) > 1 else 0
+        return 0
+
+    def _cpu_percent(self, previous: tuple[int, int], current: tuple[int, int]) -> float:
+        idle_delta = current[0] - previous[0]
+        total_delta = current[1] - previous[1]
         if total_delta <= 0:
             return 0.0
 

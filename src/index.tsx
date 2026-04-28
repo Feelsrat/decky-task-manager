@@ -1,12 +1,37 @@
 import {
   ButtonItem,
+  Focusable,
+  Navigation,
   PanelSection,
   PanelSectionRow,
   staticClasses,
 } from "@decky/ui";
-import { callable, definePlugin, toaster } from "@decky/api";
-import { CSSProperties, useEffect, useMemo, useState } from "react";
-import { FaChartBar, FaSyncAlt, FaTasks } from "react-icons/fa";
+import { callable, definePlugin, routerHook, toaster } from "@decky/api";
+import { CSSProperties, ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  FaBan,
+  FaCompress,
+  FaEraser,
+  FaExpand,
+  FaPlay,
+  FaRedo,
+  FaStop,
+  FaTasks,
+} from "react-icons/fa";
+
+const ROUTE = "/decky-task-manager";
+const POLL_MS = 2000;
+
+type PluginMetrics = {
+  name: string;
+  cpu: number;
+  memory: number;
+  processes: number;
+  peakCpu: number;
+  peakMemory: number;
+  spike: boolean;
+  spikeReason: string;
+};
 
 type PluginRow = {
   folder: string;
@@ -14,6 +39,8 @@ type PluginRow = {
   version: string;
   author: string;
   disabled: boolean;
+  logs?: LogRow;
+  metrics?: PluginMetrics;
 };
 
 type LogRow = {
@@ -22,15 +49,30 @@ type LogRow = {
   errors: number;
   files: number;
   examples: string[];
+  groups: {
+    message: string;
+    count: number;
+    file: string;
+  }[];
 };
 
 type Metrics = {
+  timestamp: number;
   cpu: number;
   memory: {
     used: number;
     total: number;
     percent: number;
   };
+  plugins: PluginMetrics[];
+  history: {
+    timestamp: number;
+    cpu: number;
+    memory: number;
+    plugins: Pick<PluginMetrics, "name" | "cpu" | "memory">[];
+  }[];
+  spike: boolean;
+  spikeReason: string;
 };
 
 type Snapshot = {
@@ -45,17 +87,79 @@ type Snapshot = {
   metrics: Metrics;
 };
 
-type DisableResult = {
+type ActionResult = {
   ok: boolean;
   message: string;
   restarted?: boolean;
+  cleared?: number;
+  failed?: number;
 };
 
 const getSnapshot = callable<[], Snapshot>("get_snapshot");
 const getMetrics = callable<[], Metrics>("get_metrics");
-const disablePlugin = callable<[name: string], DisableResult>("disable_plugin");
+const clearLogs = callable<[name?: string], ActionResult>("clear_logs");
+const disablePlugin = callable<[name: string], ActionResult>("disable_plugin");
+
+const palette = {
+  bg: "rgb(15, 18, 22)",
+  panel: "rgba(255, 255, 255, 0.055)",
+  panelStrong: "rgba(255, 255, 255, 0.085)",
+  border: "rgba(255, 255, 255, 0.12)",
+  text: "rgba(255, 255, 255, 0.94)",
+  muted: "rgba(255, 255, 255, 0.66)",
+  dim: "rgba(255, 255, 255, 0.45)",
+  blue: "rgb(69, 137, 255)",
+  teal: "rgb(8, 189, 186)",
+  red: "rgb(255, 131, 131)",
+  yellow: "rgb(241, 194, 27)",
+};
 
 const styles: Record<string, CSSProperties> = {
+  page: {
+    minHeight: "100vh",
+    padding: "28px clamp(18px, 4vw, 44px)",
+    background: palette.bg,
+    color: palette.text,
+    boxSizing: "border-box",
+  },
+  shell: {
+    display: "grid",
+    gridTemplateColumns: "minmax(280px, 0.9fr) minmax(420px, 1.5fr)",
+    gap: "16px",
+    maxWidth: "1180px",
+    margin: "0 auto",
+  },
+  qamShell: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+  },
+  panel: {
+    background: palette.panel,
+    border: `1px solid ${palette.border}`,
+    borderRadius: "8px",
+    padding: "14px",
+  },
+  header: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: "16px",
+    marginBottom: "16px",
+  },
+  title: {
+    fontSize: "26px",
+    fontWeight: 700,
+    letterSpacing: 0,
+    lineHeight: 1.08,
+  },
+  sectionTitle: {
+    fontSize: "13px",
+    color: palette.muted,
+    textTransform: "uppercase",
+    letterSpacing: 0,
+    marginBottom: "10px",
+  },
   row: {
     display: "flex",
     alignItems: "center",
@@ -66,76 +170,142 @@ const styles: Record<string, CSSProperties> = {
   stack: {
     display: "flex",
     flexDirection: "column",
-    gap: "6px",
-    width: "100%",
+    gap: "7px",
+    minWidth: 0,
   },
-  muted: {
-    opacity: 0.72,
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "10px",
+  },
+  metricCard: {
+    background: palette.panelStrong,
+    border: `1px solid ${palette.border}`,
+    borderRadius: "8px",
+    padding: "12px",
+    minHeight: "88px",
+  },
+  label: {
+    color: palette.muted,
     fontSize: "12px",
-    lineHeight: 1.25,
+    lineHeight: 1.2,
   },
   value: {
-    fontSize: "22px",
+    fontSize: "24px",
     fontWeight: 700,
     lineHeight: 1,
   },
-  meter: {
-    height: "8px",
-    width: "100%",
-    borderRadius: "4px",
-    background: "rgba(255, 255, 255, 0.16)",
-    overflow: "hidden",
+  qamValue: {
+    fontSize: "20px",
+    fontWeight: 700,
+    lineHeight: 1,
   },
-  fill: {
-    height: "100%",
-    borderRadius: "4px",
-    background: "rgb(93, 188, 210)",
-  },
-  pluginCard: {
-    borderTop: "1px solid rgba(255, 255, 255, 0.12)",
-    padding: "10px 0",
-  },
-  status: {
-    minWidth: "78px",
-    textAlign: "right",
+  muted: {
+    color: palette.muted,
     fontSize: "12px",
-    opacity: 0.8,
+    lineHeight: 1.3,
   },
-  example: {
-    opacity: 0.68,
-    fontFamily: "monospace",
+  tiny: {
+    color: palette.dim,
     fontSize: "11px",
     lineHeight: 1.25,
+  },
+  meter: {
+    height: "7px",
+    width: "100%",
+    borderRadius: "4px",
+    background: "rgba(255, 255, 255, 0.14)",
+    overflow: "hidden",
+  },
+  pluginRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(180px, 1.2fr) 96px 96px 86px 104px",
+    alignItems: "center",
+    gap: "10px",
+    padding: "10px 0",
+    borderTop: `1px solid ${palette.border}`,
+  },
+  qamPluginRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) 54px 54px 72px",
+    alignItems: "center",
+    gap: "8px",
+    padding: "9px 0",
+    borderTop: `1px solid ${palette.border}`,
+  },
+  badge: {
+    display: "inline-flex",
+    alignItems: "center",
+    width: "fit-content",
+    minHeight: "18px",
+    borderRadius: "4px",
+    padding: "1px 6px",
+    fontSize: "11px",
+    color: palette.bg,
+    background: palette.teal,
+  },
+  dangerBadge: {
+    color: palette.bg,
+    background: palette.red,
+  },
+  warnBadge: {
+    color: palette.bg,
+    background: palette.yellow,
+  },
+  examples: {
+    marginTop: "8px",
+    color: palette.dim,
+    fontFamily: "monospace",
+    fontSize: "11px",
+    lineHeight: 1.28,
     whiteSpace: "normal",
     wordBreak: "break-word",
   },
+  actions: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    justifyContent: "flex-end",
+  },
 };
 
-function Meter({ value }: { value: number }) {
+function Meter({ value, color = palette.blue }: { value: number; color?: string }) {
   return (
     <div style={styles.meter}>
-      <div style={{ ...styles.fill, width: `${Math.max(0, Math.min(100, value))}%` }} />
+      <div
+        style={{
+          height: "100%",
+          borderRadius: "4px",
+          background: color,
+          width: `${Math.max(0, Math.min(100, value))}%`,
+        }}
+      />
     </div>
   );
 }
 
-function Content() {
+function Badge({ children, tone = "good" }: { children: ReactNode; tone?: "good" | "warn" | "danger" }) {
+  const toneStyle = tone === "danger" ? styles.dangerBadge : tone === "warn" ? styles.warnBadge : {};
+  return <span style={{ ...styles.badge, ...toneStyle }}>{children}</span>;
+}
+
+function EmptyState({ children }: { children: string }) {
+  return <div style={{ ...styles.panel, ...styles.muted }}>{children}</div>;
+}
+
+function useTaskManager() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
+  const [monitoring, setMonitoring] = useState(true);
   const [loading, setLoading] = useState(false);
   const [busyPlugin, setBusyPlugin] = useState<string>();
-
-  const logRows = useMemo(() => snapshot?.logs.plugins.slice(0, 6) ?? [], [snapshot]);
-  const pluginRows = useMemo(() => snapshot?.plugins ?? [], [snapshot]);
+  const [selectedPlugin, setSelectedPlugin] = useState<string>();
 
   const refresh = async () => {
     setLoading(true);
     try {
       setSnapshot(await getSnapshot());
     } catch (error) {
-      toaster.toast({
-        title: "Decky Task Manager",
-        body: "Could not read Decky status.",
-      });
+      toaster.toast({ title: "Decky Task Manager", body: "Could not read Decky status." });
       console.error("[decky-task-manager] refresh failed", error);
     } finally {
       setLoading(false);
@@ -145,13 +315,24 @@ function Content() {
   const refreshMetrics = async () => {
     try {
       const metrics = await getMetrics();
-      setSnapshot((current) => current ? { ...current, metrics } : current);
+      setSnapshot((current) => current ? mergeMetrics(current, metrics) : current);
     } catch (error) {
-      toaster.toast({
-        title: "Decky Task Manager",
-        body: "Could not read system metrics.",
-      });
+      toaster.toast({ title: "Decky Task Manager", body: "Could not read system metrics." });
       console.error("[decky-task-manager] metrics refresh failed", error);
+    }
+  };
+
+  const onClearLogs = async (name?: string) => {
+    setLoading(true);
+    try {
+      const result = await clearLogs(name);
+      toaster.toast({ title: "Decky Task Manager", body: result.message });
+      await refresh();
+    } catch (error) {
+      toaster.toast({ title: "Decky Task Manager", body: "Could not clear logs." });
+      console.error("[decky-task-manager] clear logs failed", error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -159,19 +340,13 @@ function Content() {
     setBusyPlugin(name);
     try {
       const result = await disablePlugin(name);
-      toaster.toast({
-        title: "Decky Task Manager",
-        body: result.message,
-      });
+      toaster.toast({ title: "Decky Task Manager", body: result.message });
 
       if (!result.restarted) {
         await refresh();
       }
     } catch (error) {
-      toaster.toast({
-        title: "Decky Task Manager",
-        body: `Could not disable ${name}.`,
-      });
+      toaster.toast({ title: "Decky Task Manager", body: `Could not disable ${name}.` });
       console.error("[decky-task-manager] disable failed", error);
     } finally {
       setBusyPlugin(undefined);
@@ -182,110 +357,457 @@ function Content() {
     refresh();
   }, []);
 
+  useEffect(() => {
+    if (!monitoring) return;
+
+    const timer = window.setInterval(refreshMetrics, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [monitoring]);
+
+  return {
+    snapshot,
+    monitoring,
+    loading,
+    busyPlugin,
+    selectedPlugin,
+    setMonitoring,
+    setSelectedPlugin,
+    refresh,
+    refreshMetrics,
+    onClearLogs,
+    onDisable,
+  };
+}
+
+function mergeMetrics(snapshot: Snapshot, metrics: Metrics): Snapshot {
+  const metricMap = new Map(metrics.plugins.map((plugin) => [plugin.name, plugin]));
+  return {
+    ...snapshot,
+    metrics,
+    plugins: snapshot.plugins.map((plugin) => ({
+      ...plugin,
+      metrics: metricMap.get(plugin.name) ?? emptyPluginMetrics(plugin.name),
+    })),
+  };
+}
+
+function emptyPluginMetrics(name: string): PluginMetrics {
+  return {
+    name,
+    cpu: 0,
+    memory: 0,
+    processes: 0,
+    peakCpu: 0,
+    peakMemory: 0,
+    spike: false,
+    spikeReason: "",
+  };
+}
+
+function Dashboard({ fullscreen = false }: { fullscreen?: boolean }) {
+  const state = useTaskManager();
+  const plugins = useMemo(() => state.snapshot?.plugins ?? [], [state.snapshot]);
+  const noisyLogs = useMemo(
+    () => state.snapshot?.logs.plugins.filter((plugin) => plugin.errors > 0).slice(0, fullscreen ? 12 : 4) ?? [],
+    [state.snapshot, fullscreen],
+  );
+  const activePlugins = useMemo(
+    () => plugins
+      .map((plugin) => ({ ...plugin, metrics: plugin.metrics ?? emptyPluginMetrics(plugin.name) }))
+      .sort((a, b) => (b.metrics?.cpu ?? 0) - (a.metrics?.cpu ?? 0) || (b.metrics?.memory ?? 0) - (a.metrics?.memory ?? 0)),
+    [plugins],
+  );
+  const selectedLog = useMemo(
+    () => state.snapshot?.logs.plugins.find((plugin) => plugin.name === state.selectedPlugin),
+    [state.snapshot, state.selectedPlugin],
+  );
+
+  if (fullscreen) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.header}>
+          <div style={styles.stack}>
+            <div style={styles.title}>Decky Task Manager</div>
+            <div style={styles.muted}>
+              Live while this page is open. Clear logs, start a fresh watch, then trigger the thing you want to test.
+            </div>
+          </div>
+          <div style={styles.actions}>
+            <ButtonItem layout="below" onClick={() => Navigation.NavigateBack()}>
+              <FaCompress /> Close
+            </ButtonItem>
+            <MonitorButton monitoring={state.monitoring} onClick={() => state.setMonitoring(!state.monitoring)} />
+            <ButtonItem layout="below" disabled={state.loading} onClick={state.refresh}>
+              <FaRedo /> Refetch
+            </ButtonItem>
+            <ButtonItem layout="below" disabled={state.loading} onClick={() => state.onClearLogs()}>
+              <FaEraser /> Clear Logs
+            </ButtonItem>
+          </div>
+        </div>
+
+        <div style={styles.shell}>
+          <div style={styles.stack}>
+            <SystemPanel snapshot={state.snapshot} monitoring={state.monitoring} />
+            <LogsPanel
+              rows={noisyLogs}
+              snapshot={state.snapshot}
+              selectedLog={selectedLog}
+              onSelectPlugin={state.setSelectedPlugin}
+              onClearLogs={state.onClearLogs}
+            />
+          </div>
+          <PluginTable
+            plugins={activePlugins}
+            busyPlugin={state.busyPlugin}
+            onDisable={state.onDisable}
+            onSelectPlugin={state.setSelectedPlugin}
+            selectedPlugin={state.selectedPlugin}
+            fullscreen
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <>
+    <div style={styles.qamShell}>
+      <PanelSection title="Monitor">
+        <PanelSectionRow>
+          <div style={styles.row}>
+            <div style={styles.stack}>
+              <div style={styles.qamValue}>{state.snapshot?.metrics.cpu ?? "-"}% CPU</div>
+              <div style={styles.muted}>
+                {state.snapshot?.metrics.memory.percent ?? "-"}% RAM
+                {state.snapshot?.metrics.spike ? ` · spike: ${state.snapshot.metrics.spikeReason}` : ""}
+              </div>
+            </div>
+            <MonitorButton monitoring={state.monitoring} onClick={() => state.setMonitoring(!state.monitoring)} />
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={styles.row}>
+            <ButtonItem layout="below" onClick={openFullscreen}>
+              <FaExpand /> Fullscreen
+            </ButtonItem>
+            <ButtonItem layout="below" disabled={state.loading} onClick={state.refresh}>
+              <FaRedo /> Refetch
+            </ButtonItem>
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
       <PanelSection title="Plugin Errors">
         <PanelSectionRow>
           <div style={styles.row}>
             <div style={styles.stack}>
-              <div style={styles.value}>{snapshot?.logs.totals.errors ?? "-"}</div>
-              <div style={styles.muted}>
-                errors found across {snapshot?.logs.totals.files ?? 0} log files
-              </div>
+              <div style={styles.qamValue}>{state.snapshot?.logs.totals.errors ?? "-"}</div>
+              <div style={styles.muted}>errors across {state.snapshot?.logs.totals.files ?? 0} log files</div>
             </div>
-            <ButtonItem
-              layout="below"
-              disabled={loading}
-              onClick={refresh}
-            >
-              <FaSyncAlt /> {loading ? "Checking" : "Refresh"}
+            <ButtonItem layout="below" disabled={state.loading} onClick={() => state.onClearLogs()}>
+              <FaEraser /> Clear
             </ButtonItem>
           </div>
         </PanelSectionRow>
-
-        {logRows.length === 0 && (
+        {noisyLogs.length === 0 && (
           <PanelSectionRow>
             <div style={styles.muted}>No plugin log errors found.</div>
           </PanelSectionRow>
         )}
-
-        {logRows.map((plugin) => (
+        {noisyLogs.map((plugin) => (
           <PanelSectionRow key={plugin.name}>
-            <div style={{ ...styles.stack, ...styles.pluginCard }}>
-              <div style={styles.row}>
-                <div>
-                  <div>{plugin.name}</div>
-                  <div style={styles.muted}>{plugin.files} log file{plugin.files === 1 ? "" : "s"}</div>
-                </div>
-                <div style={styles.status}>{plugin.errors} error{plugin.errors === 1 ? "" : "s"}</div>
-              </div>
-              {plugin.examples.slice(0, 2).map((example, index) => (
-                <div style={styles.example} key={`${plugin.name}-${index}`}>
-                  {example}
-                </div>
-              ))}
-            </div>
-          </PanelSectionRow>
-        ))}
-      </PanelSection>
-
-      <PanelSection title="System and Plugins">
-        <PanelSectionRow>
-          <div style={styles.stack}>
-            <div style={styles.row}>
-              <span>CPU</span>
-              <span>{snapshot?.metrics.cpu ?? "-"}%</span>
-            </div>
-            <Meter value={snapshot?.metrics.cpu ?? 0} />
-            <div style={styles.row}>
-              <span>RAM</span>
-              <span>
-                {snapshot?.metrics.memory.percent ?? "-"}%
-              </span>
-            </div>
-            <Meter value={snapshot?.metrics.memory.percent ?? 0} />
-            <div style={styles.muted}>
-              {snapshot?.metrics.memory.used ?? "-"} MB used of {snapshot?.metrics.memory.total ?? "-"} MB
-            </div>
-          </div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={refreshMetrics}>
-            <FaChartBar /> Refresh Metrics
-          </ButtonItem>
-        </PanelSectionRow>
-
-        {pluginRows.map((plugin) => (
-          <PanelSectionRow key={plugin.name}>
-            <div style={{ ...styles.row, ...styles.pluginCard }}>
+            <div style={styles.qamPluginRow}>
               <div style={styles.stack}>
-                <div>{plugin.name}</div>
-                <div style={styles.muted}>
-                  {plugin.version ? `v${plugin.version}` : plugin.folder}
-                  {plugin.disabled ? " · disabled" : ""}
-                </div>
+                <span>{plugin.name}</span>
+                <span style={styles.tiny}>{plugin.files} files</span>
               </div>
-              <ButtonItem
-                layout="below"
-                disabled={plugin.disabled || busyPlugin === plugin.name}
-                onClick={() => onDisable(plugin.name)}
-              >
-                {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : "Disable"}
+              <span>{plugin.errors}</span>
+              <span style={styles.tiny}>errors</span>
+              <ButtonItem layout="below" onClick={() => state.onClearLogs(plugin.name)}>
+                Clear
               </ButtonItem>
             </div>
           </PanelSectionRow>
         ))}
       </PanelSection>
-    </>
+
+      <PanelSection title="Plugin Load">
+        {activePlugins.slice(0, 6).map((plugin) => (
+          <PanelSectionRow key={plugin.name}>
+            <PluginQamRow
+              plugin={plugin}
+              busyPlugin={state.busyPlugin}
+              onDisable={state.onDisable}
+            />
+          </PanelSectionRow>
+        ))}
+      </PanelSection>
+    </div>
   );
 }
 
+function MonitorButton({ monitoring, onClick }: { monitoring: boolean; onClick(): void }) {
+  return (
+    <ButtonItem layout="below" onClick={onClick}>
+      {monitoring ? <FaStop /> : <FaPlay />} {monitoring ? "Stop" : "Start"}
+    </ButtonItem>
+  );
+}
+
+function SystemPanel({ snapshot, monitoring }: { snapshot?: Snapshot; monitoring: boolean }) {
+  const metrics = snapshot?.metrics;
+  const activeCount = metrics?.plugins.filter((plugin) => plugin.processes > 0).length ?? 0;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.sectionTitle}>System</div>
+      <div style={styles.grid}>
+        <MetricCard label="CPU" value={`${metrics?.cpu ?? "-"}%`} tone={metrics?.cpu && metrics.cpu > 85 ? "danger" : "good"} />
+        <MetricCard label="RAM" value={`${metrics?.memory.percent ?? "-"}%`} detail={`${metrics?.memory.used ?? "-"} / ${metrics?.memory.total ?? "-"} MB`} />
+        <MetricCard
+          label="Watch"
+          value={monitoring ? "live" : "paused"}
+          detail={`${activeCount} active plugin${activeCount === 1 ? "" : "s"}`}
+        />
+      </div>
+      <div style={{ marginTop: "14px" }}>
+        <div style={styles.row}>
+          <span style={styles.label}>cpu</span>
+          <span>{metrics?.cpu ?? "-"}%</span>
+        </div>
+        <Meter value={metrics?.cpu ?? 0} color={metrics?.spike ? palette.red : palette.blue} />
+      </div>
+      <div style={{ marginTop: "10px" }}>
+        <div style={styles.row}>
+          <span style={styles.label}>ram</span>
+          <span>{metrics?.memory.percent ?? "-"}%</span>
+        </div>
+        <Meter value={metrics?.memory.percent ?? 0} color={palette.teal} />
+      </div>
+      {metrics?.spike && (
+        <div style={{ marginTop: "10px" }}>
+          <Badge tone="danger">spike: {metrics.spikeReason}</Badge>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetricCard({ label, value, detail, tone = "good" }: { label: string; value: string; detail?: string; tone?: "good" | "danger" }) {
+  return (
+    <div style={styles.metricCard}>
+      <div style={styles.label}>{label}</div>
+      <div style={{ ...styles.value, color: tone === "danger" ? palette.red : palette.text }}>{value}</div>
+      {detail && <div style={styles.tiny}>{detail}</div>}
+    </div>
+  );
+}
+
+function LogsPanel({
+  rows,
+  snapshot,
+  selectedLog,
+  onSelectPlugin,
+  onClearLogs,
+}: {
+  rows: LogRow[];
+  snapshot?: Snapshot;
+  selectedLog?: LogRow;
+  onSelectPlugin(name?: string): void;
+  onClearLogs(name?: string): void;
+}) {
+  const detail = selectedLog && selectedLog.errors > 0 ? selectedLog : undefined;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.row}>
+        <div>
+          <div style={styles.sectionTitle}>Plugin Errors</div>
+          <div style={styles.value}>{snapshot?.logs.totals.errors ?? "-"} errors</div>
+          <div style={styles.muted}>from {snapshot?.logs.totals.files ?? 0} scanned log files</div>
+        </div>
+        <ButtonItem layout="below" onClick={() => onClearLogs()}>
+          <FaEraser /> Clear All
+        </ButtonItem>
+      </div>
+
+      {detail && (
+        <div style={{ marginTop: "14px", paddingTop: "12px", borderTop: `1px solid ${palette.border}` }}>
+          <div style={styles.row}>
+            <div style={styles.stack}>
+              <span>{detail.name}</span>
+              <span style={styles.muted}>{detail.errors} grouped into {detail.groups.length} row{detail.groups.length === 1 ? "" : "s"}</span>
+            </div>
+            <ButtonItem layout="below" onClick={() => onSelectPlugin(undefined)}>
+              Hide
+            </ButtonItem>
+          </div>
+          {detail.groups.slice(0, 10).map((group, index) => (
+            <div key={`${detail.name}-${index}`} style={{ paddingTop: "10px" }}>
+              <div style={styles.row}>
+                <Badge tone={group.count > 5 ? "danger" : "warn"}>{group.count}x</Badge>
+                <span style={styles.tiny}>{group.file}</span>
+              </div>
+              <div style={styles.examples}>{group.message}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {rows.length === 0 && <EmptyState>No plugin log errors found.</EmptyState>}
+
+      {rows.map((plugin) => (
+        <div key={plugin.name} style={{ paddingTop: "12px", borderTop: `1px solid ${palette.border}`, marginTop: "12px" }}>
+          <div style={styles.row}>
+            <div style={styles.stack}>
+              <span>{plugin.name}</span>
+              <span style={styles.muted}>{plugin.files} log file{plugin.files === 1 ? "" : "s"}</span>
+            </div>
+            <div style={styles.actions}>
+              <Badge tone={plugin.errors > 10 ? "danger" : "warn"}>{plugin.errors} errors</Badge>
+              <ButtonItem layout="below" onClick={() => onSelectPlugin(plugin.name)}>
+                View
+              </ButtonItem>
+              <ButtonItem layout="below" onClick={() => onClearLogs(plugin.name)}>
+                Clear
+              </ButtonItem>
+            </div>
+          </div>
+          {plugin.examples.slice(0, 2).map((example, index) => (
+            <div style={styles.examples} key={`${plugin.name}-${index}`}>{example}</div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PluginTable({
+  plugins,
+  busyPlugin,
+  onDisable,
+  onSelectPlugin,
+  selectedPlugin,
+  fullscreen = false,
+}: {
+  plugins: PluginRow[];
+  busyPlugin?: string;
+  onDisable(name: string): void;
+  onSelectPlugin?(name: string): void;
+  selectedPlugin?: string;
+  fullscreen?: boolean;
+}) {
+  return (
+    <div style={styles.panel}>
+      <div style={styles.row}>
+        <div>
+          <div style={styles.sectionTitle}>Plugins</div>
+          <div style={styles.value}>{plugins.length} installed</div>
+        </div>
+        <Badge>{plugins.filter((plugin) => plugin.metrics?.processes).length} active</Badge>
+      </div>
+
+      <div style={{ ...styles.pluginRow, color: palette.muted, fontSize: "12px", paddingTop: "16px" }}>
+        <span>name</span>
+        <span>cpu</span>
+        <span>ram</span>
+        <span>state</span>
+        <span>action</span>
+      </div>
+
+      {plugins.map((plugin) => {
+        const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
+        const isSelected = selectedPlugin === plugin.name;
+        return (
+          <Focusable
+            style={{
+              ...styles.pluginRow,
+              background: isSelected ? "rgba(69, 137, 255, 0.12)" : "transparent",
+            }}
+            key={plugin.name}
+            onActivate={() => onSelectPlugin?.(plugin.name)}
+          >
+            <div style={styles.stack}>
+              <span>{plugin.name}</span>
+              <span style={styles.tiny}>
+                {plugin.version ? `v${plugin.version}` : plugin.folder}
+                {metrics.processes ? ` · ${metrics.processes} process${metrics.processes === 1 ? "" : "es"}` : " · idle"}
+              </span>
+              {fullscreen && metrics.spike && <Badge tone="danger">spike: {metrics.spikeReason}</Badge>}
+            </div>
+            <MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />
+            <MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />
+            <span style={styles.muted}>{plugin.disabled ? "disabled" : metrics.processes ? "running" : "idle"}</span>
+            <ButtonItem
+              layout="below"
+              disabled={plugin.disabled || busyPlugin === plugin.name}
+              onClick={() => onDisable(plugin.name)}
+            >
+              <FaBan /> {plugin.disabled ? "Disabled" : busyPlugin === plugin.name ? "Disabling" : "Disable"}
+            </ButtonItem>
+          </Focusable>
+        );
+      })}
+    </div>
+  );
+}
+
+function PluginQamRow({
+  plugin,
+  busyPlugin,
+  onDisable,
+}: {
+  plugin: PluginRow;
+  busyPlugin?: string;
+  onDisable(name: string): void;
+}) {
+  const metrics = plugin.metrics ?? emptyPluginMetrics(plugin.name);
+  return (
+    <div style={styles.qamPluginRow}>
+      <div style={styles.stack}>
+        <span>{plugin.name}</span>
+        <span style={styles.tiny}>{plugin.disabled ? "disabled" : metrics.processes ? "running" : "idle"}</span>
+      </div>
+      <MetricCell value={metrics.cpu} suffix="%" spike={metrics.spike && metrics.spikeReason === "cpu"} />
+      <MetricCell value={metrics.memory} suffix=" MB" spike={metrics.spike && metrics.spikeReason === "ram"} />
+      <ButtonItem
+        layout="below"
+        disabled={plugin.disabled || busyPlugin === plugin.name}
+        onClick={() => onDisable(plugin.name)}
+      >
+        Disable
+      </ButtonItem>
+    </div>
+  );
+}
+
+function MetricCell({ value, suffix, spike }: { value: number; suffix: string; spike?: boolean }) {
+  return (
+    <span style={{ color: spike ? palette.red : palette.text, fontVariantNumeric: "tabular-nums" }}>
+      {value}{suffix}
+    </span>
+  );
+}
+
+function openFullscreen() {
+  Navigation.Navigate(ROUTE);
+  Navigation.CloseSideMenus();
+}
+
+function FullscreenRoute() {
+  return <Dashboard fullscreen />;
+}
+
 export default definePlugin(() => {
+  routerHook.addRoute(ROUTE, FullscreenRoute, { exact: true });
+
   return {
     name: "Decky Task Manager",
     titleView: <div className={staticClasses.Title}>Decky Task Manager</div>,
-    content: <Content />,
+    content: <Dashboard />,
     icon: <FaTasks />,
-    onDismount() {},
+    onDismount() {
+      routerHook.removeRoute(ROUTE);
+    },
   };
 });
