@@ -33,6 +33,7 @@ class Plugin:
         self._previous_cpu: tuple[int, int] | None = None
         self._previous_processes: dict[int, int] = {}
         self._history: list[dict[str, Any]] = []
+        self._last_update_error = ""
 
     async def _main(self):
         decky.logger.info("Decky Task Manager loaded")
@@ -156,12 +157,13 @@ class Plugin:
         current = self._current_version()
         release = self._latest_release()
         if release is None:
+            detail = f" {self._last_update_error}" if self._last_update_error else ""
             return {
                 "ok": False,
                 "current": current,
                 "hasUpdate": False,
                 "canInstall": False,
-                "message": "Could not read GitHub releases. The repo must be public and reachable.",
+                "message": f"Could not read GitHub releases.{detail}",
             }
 
         latest = str(release.get("tag_name", "")).removeprefix("v")
@@ -591,21 +593,13 @@ class Plugin:
         return self._package_version(package_path)
 
     def _latest_release(self) -> dict[str, Any] | None:
-        request = urllib.request.Request(
-            GITHUB_RELEASES_URL,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "decky-task-manager",
-            },
-        )
-
-        try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                releases = json.loads(response.read().decode("utf-8"))
-        except (OSError, json.JSONDecodeError, urllib.error.URLError):
+        self._last_update_error = ""
+        releases = self._fetch_json(GITHUB_RELEASES_URL)
+        if releases is None:
             return None
 
         if not isinstance(releases, list):
+            self._last_update_error = "GitHub returned an unexpected response."
             return None
 
         for release in releases:
@@ -615,6 +609,43 @@ class Plugin:
                 return release
 
         return None
+
+    def _fetch_json(self, url: str) -> Any | None:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "decky-task-manager",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, json.JSONDecodeError, urllib.error.URLError) as error:
+            self._last_update_error = f"Python fetch failed: {error}"
+
+        try:
+            result = subprocess.run(
+                ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json", "-A", "decky-task-manager", url],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self._last_update_error += f"; curl failed: {error}"
+            return None
+
+        if result.returncode != 0:
+            self._last_update_error += f"; curl exited {result.returncode}: {result.stderr.strip()[-120:]}"
+            return None
+
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            self._last_update_error += f"; curl JSON parse failed: {error}"
+            return None
 
     def _release_asset(self, release: dict[str, Any]) -> dict[str, Any] | None:
         assets = release.get("assets", [])
@@ -639,8 +670,7 @@ class Plugin:
             temp_path = Path(temp_root)
             archive_path = temp_path / "release.zip"
 
-            with urllib.request.urlopen(request, timeout=30) as response:
-                archive_path.write_bytes(response.read())
+            self._download_file(request, archive_path)
 
             extract_dir = temp_path / "extract"
             with zipfile.ZipFile(archive_path) as archive:
@@ -688,6 +718,24 @@ class Plugin:
                 raise ValueError("release zip contains an unsafe path")
 
         archive.extractall(target)
+
+    def _download_file(self, request: urllib.request.Request, target: Path) -> None:
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                target.write_bytes(response.read())
+                return
+        except (OSError, urllib.error.URLError):
+            pass
+
+        result = subprocess.run(
+            ["curl", "-fL", "-A", "decky-task-manager", "-o", str(target), request.full_url],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if result.returncode != 0:
+            raise urllib.error.URLError(result.stderr.strip() or f"curl exited {result.returncode}")
 
     def _schedule_loader_restart(self) -> bool:
         command = (
