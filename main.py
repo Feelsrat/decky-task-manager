@@ -3,7 +3,6 @@ import json
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import tempfile
 import time
@@ -14,6 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import decky
+
+# Try to import SSL - may fail on systems with missing OpenSSL
+try:
+    import ssl
+    SSL_AVAILABLE = True
+except (ImportError, OSError) as e:
+    SSL_AVAILABLE = False
+    print(f"Warning: SSL not available ({e}). Will use curl for HTTPS.")
 
 
 ERROR_PATTERN = re.compile(
@@ -773,24 +780,27 @@ class Plugin:
         return None
 
     def _fetch_json(self, url: str) -> Any | None:
-        # Try Python urllib with SSL context first
-        try:
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "decky-task-manager",
-                },
-            )
-            
-            with urllib.request.urlopen(request, timeout=10, context=ssl_context) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (OSError, json.JSONDecodeError, urllib.error.URLError) as error:
-            self._last_update_error = f"Python fetch failed: {error}"
+        # Try Python urllib with SSL context first (if SSL is available)
+        if SSL_AVAILABLE:
+            try:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "decky-task-manager",
+                    },
+                )
+                
+                with urllib.request.urlopen(request, timeout=10, context=ssl_context) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except (OSError, json.JSONDecodeError, urllib.error.URLError) as error:
+                self._last_update_error = f"Python fetch failed: {error}"
+        else:
+            decky.logger.info("SSL not available, using curl for HTTPS")
 
         # Fallback to curl
         try:
@@ -910,20 +920,23 @@ class Plugin:
     def _download_file(self, request: urllib.request.Request, target: Path) -> None:
         decky.logger.info(f"Attempting download from: {request.full_url}")
         
-        # Try Python urllib with SSL context first
-        try:
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            decky.logger.info("Trying Python urllib...")
-            with urllib.request.urlopen(request, timeout=45, context=ssl_context) as response:
-                data = response.read()
-                target.write_bytes(data)
-                decky.logger.info(f"Download successful via urllib: {len(data)} bytes")
-                return
-        except (OSError, urllib.error.URLError) as error:
-            decky.logger.warning(f"Python download failed, trying curl: {error}")
+        # Try Python urllib with SSL context first (if SSL is available)
+        if SSL_AVAILABLE:
+            try:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
+                decky.logger.info("Trying Python urllib...")
+                with urllib.request.urlopen(request, timeout=45, context=ssl_context) as response:
+                    data = response.read()
+                    target.write_bytes(data)
+                    decky.logger.info(f"Download successful via urllib: {len(data)} bytes")
+                    return
+            except (OSError, urllib.error.URLError) as error:
+                decky.logger.warning(f"Python download failed, trying curl: {error}")
+        else:
+            decky.logger.info("SSL not available, using curl for download")
 
         # Fallback to curl
         decky.logger.info("Trying curl fallback...")

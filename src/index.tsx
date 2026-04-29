@@ -291,6 +291,38 @@ const Dashboard: FC = () => {
       {/* Overview Tab */}
       {activeTab === "overview" && (
         <>
+          <PanelSection title="Monitoring">
+            <PanelSectionRow>
+              <ToggleField
+                label="Live Monitoring"
+                description={state.monitoring ? "Updating every 1s (micro-sampling for spikes)" : "OFF - Showing snapshot only"}
+                checked={state.monitoring}
+                onChange={(val) => state.setMonitoring(val)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={state.handleTestMode} disabled={state.loading}>
+                <FaVial /> Start Test Mode
+              </ButtonItem>
+            </PanelSectionRow>
+            <div style={{ padding: "8px 16px", fontSize: "12px", opacity: 0.7, lineHeight: 1.4 }}>
+              Test mode clears logs and metrics, then starts monitoring. Use this to reproduce issues.
+            </div>
+            {!state.monitoring && (
+              <div style={{ 
+                padding: "8px 16px", 
+                fontSize: "12px", 
+                color: "#f39c12", 
+                lineHeight: 1.4,
+                background: "rgba(243, 156, 18, 0.1)",
+                borderRadius: "4px",
+                margin: "8px 16px"
+              }}>
+                ⚠️ Live monitoring is OFF. CPU/RAM metrics are snapshots only and may be outdated.
+              </div>
+            )}
+          </PanelSection>
+
           <PanelSection title="Plugin Resources">
             <PanelSectionRow>
               <Field 
@@ -343,38 +375,6 @@ const Dashboard: FC = () => {
                 </div>
               </Field>
             </PanelSectionRow>
-          </PanelSection>
-
-          <PanelSection title="Monitoring">
-            <PanelSectionRow>
-              <ToggleField
-                label="Live Monitoring"
-                description={state.monitoring ? "Updating every 1s (micro-sampling for spikes)" : "OFF - Showing snapshot only"}
-                checked={state.monitoring}
-                onChange={(val) => state.setMonitoring(val)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={state.handleTestMode} disabled={state.loading}>
-                <FaVial /> Start Test Mode
-              </ButtonItem>
-            </PanelSectionRow>
-            <div style={{ padding: "8px 16px", fontSize: "12px", opacity: 0.7, lineHeight: 1.4 }}>
-              Test mode clears logs and metrics, then starts monitoring. Use this to reproduce issues.
-            </div>
-            {!state.monitoring && (
-              <div style={{ 
-                padding: "8px 16px", 
-                fontSize: "12px", 
-                color: "#f39c12", 
-                lineHeight: 1.4,
-                background: "rgba(243, 156, 18, 0.1)",
-                borderRadius: "4px",
-                margin: "8px 16px"
-              }}>
-                ⚠️ Live monitoring is OFF. CPU/RAM metrics are snapshots only and may be outdated.
-              </div>
-            )}
           </PanelSection>
 
           <PanelSection title="Updates">
