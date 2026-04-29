@@ -281,12 +281,33 @@ class Plugin:
 
         try:
             self._install_release_zip(str(asset["browser_download_url"]))
-        except (OSError, ValueError, urllib.error.URLError, zipfile.BadZipFile) as error:
-            decky.logger.exception("Update failed: %s", error)
+        except ValueError as error:
+            decky.logger.exception("Update failed - invalid ZIP structure: %s", error)
             return {
                 **status,
                 "ok": False,
-                "message": "Update failed while installing the release zip.",
+                "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
+            }
+        except urllib.error.URLError as error:
+            decky.logger.exception("Update failed - download error: %s", error)
+            return {
+                **status,
+                "ok": False,
+                "message": "Update failed: Could not download release. Check internet connection.",
+            }
+        except zipfile.BadZipFile as error:
+            decky.logger.exception("Update failed - corrupt ZIP: %s", error)
+            return {
+                **status,
+                "ok": False,
+                "message": "Update failed: Downloaded ZIP is corrupted. Try again.",
+            }
+        except OSError as error:
+            decky.logger.exception("Update failed - file system error: %s", error)
+            return {
+                **status,
+                "ok": False,
+                "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
             }
 
         restarted = self._schedule_loader_restart()
@@ -796,6 +817,12 @@ class Plugin:
 
         for member in archive.infolist():
             destination = (target / member.filename).resolve()
+            if not destination.is_relative_to(resolved_target):
+                raise ValueError(f"Attempted path traversal in zip: {member.filename}")
+
+        archive.extractall(target)
+
+    def _download_file(self, request: urllib.request.Request, target: Path) -> None:
         # Try Python urllib with SSL context first
         try:
             ssl_context = ssl.create_default_context()
