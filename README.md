@@ -35,5 +35,6 @@ To create a new release, make sure you have the GitHub CLI installed and authent
 - Create a list of known errors for common plugins and alert the user if errors are serious
 - alert user if logs are being hit constantly by a plugin every x secs and stuff like that
 - fix the auto updater, disabled for now but was creating zombie processes and not clearing previous instances on decky refresh
+- fix the ui so that its fully usable with the controls, currently you have to use touch screen as a big chunk of the middle area in the overview tab is not focusable (it is in the code but theres probably a support issue there or something).
   
 
