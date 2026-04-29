@@ -9,6 +9,8 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections import deque
+from heapq import nlargest
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +43,8 @@ class Plugin:
     def __init__(self):
         self._previous_cpu: tuple[int, int] | None = None
         self._previous_processes: dict[int, int] = {}
-        self._history: list[dict[str, Any]] = []
+        # Deque for O(1) append and automatic size limiting (circular buffer pattern)
+        self._history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
         self._last_update_error = ""
         self._cached_update_status: dict[str, Any] | None = None
         self._last_check_time = 0.0
@@ -135,7 +138,8 @@ class Plugin:
     async def reset_metrics(self) -> dict[str, Any]:
         self._previous_cpu = None
         self._previous_processes = {}
-        self._history = []
+        # Clear deque instead of reassigning (maintains maxlen property)
+        self._history.clear()
 
         return {
             "ok": True,
@@ -261,7 +265,8 @@ class Plugin:
         else:
             latest = str(release.get("tag_name", "")).removeprefix("v")
             asset = self._release_asset(release)
-            has_update = bool(latest and latest != current and asset)
+            # Use semantic version comparison instead of string equality (DSA: Tuple Comparison)
+            has_update = bool(latest and self._is_newer_version(current, latest) and asset)
             can_install = bool(asset)
 
             result = {
@@ -334,9 +339,6 @@ class Plugin:
                 "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
             }
 
-        # Kill any old plugin processes before restarting
-        self._kill_old_processes()
-        
         restarted = self._schedule_loader_restart()
         return {
             **status,
@@ -396,6 +398,7 @@ class Plugin:
         logs: dict[str, Any],
         metrics: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        # Use hash tables for O(1) lookups instead of O(n) list searches (DSA: Hash Table)
         log_map = {row["name"]: row for row in logs["plugins"]}
         metric_map = {row["name"]: row for row in metrics["plugins"]}
         rows: list[dict[str, Any]] = []
@@ -478,6 +481,15 @@ class Plugin:
                         examples.append(line[-220:])
 
             totals["errors"] += errors
+            
+            # Use heap to get top N error groups efficiently (DSA: Min-Heap)
+            # nlargest is O(n log k) instead of O(n log n) for full sort
+            top_groups = nlargest(
+                MAX_ERROR_GROUPS,
+                grouped.values(),
+                key=lambda item: (item["count"], item["message"].lower())
+            )
+            
             plugin_rows.append(
                 {
                     "name": plugin["name"],
@@ -485,10 +497,7 @@ class Plugin:
                     "errors": errors,
                     "files": len(paths),
                     "examples": examples,
-                    "groups": sorted(
-                        grouped.values(),
-                        key=lambda item: (-item["count"], item["message"].lower()),
-                    )[:MAX_ERROR_GROUPS],
+                    "groups": top_groups,
                 }
             )
 
@@ -669,6 +678,7 @@ class Plugin:
                 "",
             )
 
+        # Deque automatically handles maxlen - no manual slicing needed (DSA: Circular Buffer)
         self._history.append(
             {
                 "timestamp": metrics["timestamp"],
@@ -684,8 +694,8 @@ class Plugin:
                 ],
             }
         )
-        self._history = self._history[-HISTORY_LIMIT:]
-        metrics["history"] = self._history
+        # Convert deque to list for JSON serialization
+        metrics["history"] = list(self._history)
 
     def _plugin_history_peaks(self) -> dict[str, dict[str, float]]:
         peaks: dict[str, dict[str, float]] = {}
@@ -760,6 +770,28 @@ class Plugin:
     def _current_version(self) -> str:
         package_path = Path(decky.DECKY_PLUGIN_DIR) / "package.json"
         return self._package_version(package_path)
+
+    def _parse_version(self, version: str) -> tuple[int, ...]:
+        """
+        Parse semantic version string to tuple for comparison (DSA: Tuple Comparison).
+        Converts "1.2.3" to (1, 2, 3) for proper version ordering.
+        Example: (0, 1, 10) > (0, 1, 9) but "0.1.10" < "0.1.9" as strings.
+        """
+        try:
+            # Remove 'v' prefix and split by dots
+            clean = version.removeprefix("v").split("-")[0]  # Handle "1.2.3-beta" -> "1.2.3"
+            return tuple(int(part) for part in clean.split(".") if part.isdigit())
+        except (ValueError, AttributeError):
+            return (0,)  # Fallback for invalid versions
+
+    def _is_newer_version(self, current: str, latest: str) -> bool:
+        """
+        Compare versions using tuple comparison (DSA: Lexicographic Ordering).
+        Returns True if latest > current semantically.
+        """
+        current_tuple = self._parse_version(current)
+        latest_tuple = self._parse_version(latest)
+        return latest_tuple > current_tuple
 
     def _latest_release(self) -> dict[str, Any] | None:
         self._last_update_error = ""
@@ -871,6 +903,12 @@ class Plugin:
                 raise ValueError("release zip did not contain a Decky plugin")
             
             decky.logger.info(f"Found plugin at: {extracted_plugin}")
+
+            # Kill all old processes BEFORE cleanup (including processes from backup dirs)
+            self._kill_old_processes()
+
+            # Clean up all old backup directories before creating new one
+            self._cleanup_old_backups(plugin_dir)
 
             backup_dir = plugin_dir.with_name(f"{plugin_dir.name}.previous")
             if backup_dir.exists():
@@ -986,20 +1024,47 @@ class Plugin:
         decky.logger.error("All restart methods failed - manual restart required")
         return False
 
+    def _cleanup_old_backups(self, plugin_dir: Path) -> None:
+        """
+        Remove all old backup directories (*.previous*) before creating a new backup.
+        This prevents accumulation of multiple backup directories.
+        """
+        try:
+            plugins_dir = plugin_dir.parent
+            plugin_name = plugin_dir.name
+            
+            # Find all backup directories
+            backup_pattern = f"{plugin_name}.previous*"
+            backups = list(plugins_dir.glob(backup_pattern))
+            
+            if backups:
+                decky.logger.info(f"Found {len(backups)} old backup(s) to remove")
+                for backup in backups:
+                    try:
+                        decky.logger.info(f"Removing old backup: {backup.name}")
+                        shutil.rmtree(backup)
+                    except Exception as error:
+                        decky.logger.warning(f"Failed to remove {backup.name}: {error}")
+            else:
+                decky.logger.info("No old backups found")
+                
+        except Exception as error:
+            decky.logger.warning(f"Failed to cleanup old backups: {error}")
+
     def _kill_old_processes(self) -> None:
         """
         Kill any old decky-task-manager Python processes before restarting.
         This prevents zombie processes from staying alive after updates.
+        Searches for processes from main directory AND backup directories.
         """
         try:
             current_pid = os.getpid()
-            plugin_dir = str(Path(decky.DECKY_PLUGIN_DIR).resolve())
             
             decky.logger.info(f"Searching for old processes (current PID: {current_pid})")
             
-            # Find all Python processes running from this plugin directory
+            # Find all Python processes running decky-task-manager (from any directory)
             result = subprocess.run(
-                ["pgrep", "-f", plugin_dir],
+                ["pgrep", "-f", "decky-task-manager/main.py"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -1007,8 +1072,9 @@ class Plugin:
             
             if result.returncode == 0:
                 pids = [int(pid) for pid in result.stdout.strip().split("\n") if pid]
-                decky.logger.info(f"Found {len(pids)} process(es) for this plugin: {pids}")
+                decky.logger.info(f"Found {len(pids)} decky-task-manager process(es): {pids}")
                 
+                killed = 0
                 for pid in pids:
                     if pid == current_pid:
                         decky.logger.info(f"Skipping current process (PID: {pid})")
@@ -1017,9 +1083,13 @@ class Plugin:
                     try:
                         decky.logger.info(f"Killing old process PID: {pid}")
                         subprocess.run(["kill", "-9", str(pid)], timeout=2, check=False)
+                        killed += 1
                         decky.logger.info(f"✓ Killed PID: {pid}")
                     except Exception as error:
                         decky.logger.warning(f"Failed to kill PID {pid}: {error}")
+                
+                if killed > 0:
+                    decky.logger.info(f"✓ Successfully killed {killed} old process(es)")
             else:
                 decky.logger.info("No additional plugin processes found")
                 
