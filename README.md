@@ -19,3 +19,31 @@ Decky plugins are brilliant, but when one starts misbehaving it can be annoying 
 - Decky Task Manager will not disable itself.
 - The error count is a log scan, not a crash reporter. It is intentionally simple and may count noisy warning-style lines if a plugin logs them with words like `failed` or `error`.
 - The plugin uses Decky's root flag because it needs to read Decky settings and restart Decky Loader.
+
+## Development
+
+### Build
+
+```bash
+pnpm install    # Install dependencies
+pnpm run build  # Build the plugin
+pnpm run watch  # Watch mode for development
+```
+
+### Release
+
+```bash
+# One-time setup: Install and authenticate with GitHub CLI
+winget install GitHub.cli
+gh auth login
+
+# Build, package, and release to GitHub in one command
+pnpm run release
+```
+
+This will:
+1. Clean old build artifacts
+2. Build the plugin
+3. Create a zip package
+4. Create a GitHub release with the zip attached
+
