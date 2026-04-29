@@ -41,16 +41,20 @@ def create_plugin_zip(output_filename='decky-task-manager.zip'):
         print("❌ Error: dist folder not found")
         sys.exit(1)
     
-    # Create ZIP with forward slashes
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    # Create ZIP with forward slashes (using STORED = no compression for compatibility)
+    print("\nCreating ZIP archive (uncompressed for maximum compatibility)...")
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zipf:
         # Add root files
+        print("\nAdding root files:")
         for filename in root_files:
             file_path = root_dir / filename
             # Use forward slash in ZIP regardless of OS
             zipf.write(file_path, filename)
-            print(f"  Added: {filename}")
+            info = zipf.getinfo(filename)
+            print(f"  ✓ {filename} -> ZIP path: '{info.filename}' (size: {info.file_size} bytes)")
         
         # Add dist folder contents
+        print("\nAdding dist folder:")
         for file_path in dist_dir.rglob('*'):
             if file_path.is_file():
                 # Create relative path with forward slashes
@@ -58,9 +62,17 @@ def create_plugin_zip(output_filename='decky-task-manager.zip'):
                 # Convert to POSIX path (forward slashes) for ZIP
                 zip_path_str = relative_path.as_posix()
                 zipf.write(file_path, zip_path_str)
-                print(f"  Added: {zip_path_str}")
+                info = zipf.getinfo(zip_path_str)
+                print(f"  ✓ {zip_path_str} -> ZIP path: '{info.filename}' (size: {info.file_size} bytes)")
     
     print(f"\n✓ Created {output_filename}")
+    print(f"\nVerifying ZIP contents:")
+    with zipfile.ZipFile(zip_path, 'r') as zipf:
+        print(f"Total files in ZIP: {len(zipf.namelist())}")
+        print("\nAll ZIP entries:")
+        for name in zipf.namelist():
+            print(f"  - '{name}'")
+    
     return str(zip_path)
 
 if __name__ == '__main__':

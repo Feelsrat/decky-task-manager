@@ -1,0 +1,11 @@
+{
+  "name": "Decky Task Manager",
+  "author": "yuri",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["task-manager", "logs", "metrics", "root"],
+    "description": "A small Decky panel for checking plugin log errors, system load, and disabling plugins.",
+    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+  }
+}
