@@ -881,30 +881,32 @@ class Plugin:
     def _schedule_loader_restart(self) -> bool:
         decky.logger.info("Attempting to restart Decky Loader...")
         
-        # Try multiple restart methods
+        # Try multiple restart commands, fire-and-forget with proper detachment
         commands = [
-            "systemctl restart plugin_loader",           # System service
-            "systemctl --user restart plugin_loader",  # User service
-            "systemctl restart plugin_loader.service",
-            "systemctl --user restart plugin_loader.service",
+            "sleep 2 && systemctl restart plugin_loader",
+            "sleep 2 && systemctl --user restart plugin_loader",
+            "sleep 2 && systemctl restart plugin_loader.service",
+            "sleep 2 && systemctl --user restart plugin_loader.service",
         ]
         
         for cmd in commands:
             try:
                 decky.logger.info(f"Trying: {cmd}")
-                result = subprocess.run(
-                    ["bash", "-c", f"sleep 1; {cmd}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                # Use Popen with full detachment - don't wait for result
+                process = subprocess.Popen(
+                    ["bash", "-c", cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,  # Fully detach from parent
+                    preexec_fn=os.setpgrp if hasattr(os, 'setpgrp') else None,  # New process group
                 )
-                if result.returncode == 0:
-                    decky.logger.info(f"✓ Restart scheduled via: {cmd}")
-                    return True
-                else:
-                    decky.logger.warning(f"Failed ({result.returncode}): {result.stderr.strip()}")
+                decky.logger.info(f"✓ Restart scheduled (detached PID: {process.pid})")
+                # Return immediately - don't wait for the restart
+                return True
             except Exception as error:
                 decky.logger.warning(f"Exception with '{cmd}': {error}")
+                continue
         
         decky.logger.error("All restart methods failed - manual restart required")
         return False
