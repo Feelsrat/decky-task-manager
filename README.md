@@ -42,3 +42,7 @@ Smoke-test updater replacement/restart on a Steam Deck before publishing a publi
 
 To create a new release, make sure you have the GitHub CLI installed and authenticated with `gh auth login`. Then run `pnpm run release` which will bump the version, run tests, build everything, package it into a ZIP, and create a new release on GitHub. Use `pnpm run release -- --private` to create a draft release for review before publishing it.
 
+## TODO
+
+- Check for feasability of drawing an overlay when monitoring is enabled
+- Fix the poxy x buttons that kill processes, they work but not with the physical controls
