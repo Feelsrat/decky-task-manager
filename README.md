@@ -32,6 +32,8 @@ To create a new release, make sure you have the GitHub CLI installed and authent
 
 ## TODO (If I feel like maintaining this)
 
-Create a list of known errors for common plugins and alert the user if errors are serious
-alert user if logs are being hit constantly by a plugin every x secs and stuff like that
+- Create a list of known errors for common plugins and alert the user if errors are serious
+- alert user if logs are being hit constantly by a plugin every x secs and stuff like that
+- fix the auto updater, disabled for now but was creating zombie processes and not clearing previous instances on decky refresh
+  
 
