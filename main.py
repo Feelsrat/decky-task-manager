@@ -2,7 +2,9 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -37,24 +39,118 @@ PLUGIN_CPU_SPIKE = 20.0
 PLUGIN_MEMORY_SPIKE_MB = 250
 GITHUB_RELEASES_URL = "https://api.github.com/repos/Feelsrat/decky-task-manager/releases"
 AUTO_CHECK_INTERVAL = 86400  # 24 hours in seconds
+AUTO_UPDATE_CHECK_ON_STARTUP = False
+MONITORING_POLL_SECONDS = 1.0
+LOG_ALERT_POLL_SECONDS = 5.0
+LOG_SPAM_BYTES_PER_SECOND = 4096
+LOG_SPAM_LINES_PER_SECOND = 10
+LOG_SPAM_ERRORS_PER_SECOND = 1.0
+
+SEVERITY_RANK = {
+    "info": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+KNOWN_ERROR_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "traceback",
+        "severity": "critical",
+        "title": "Python crash traceback",
+        "pattern": re.compile(r"\btraceback \(most recent call last\)|\bunhandled exception\b", re.IGNORECASE),
+        "advice": "The plugin backend threw an unhandled exception.",
+    },
+    {
+        "id": "oom",
+        "severity": "critical",
+        "title": "Out of memory",
+        "pattern": re.compile(r"\bout of memory\b|\boom-kill|cannot allocate memory", re.IGNORECASE),
+        "advice": "The plugin or system is running out of memory.",
+    },
+    {
+        "id": "permission",
+        "severity": "high",
+        "title": "Permission failure",
+        "pattern": re.compile(r"\bpermission denied\b|\boperation not permitted\b|\beacces\b", re.IGNORECASE),
+        "advice": "The plugin tried to access something it is not allowed to use.",
+    },
+    {
+        "id": "missing_dependency",
+        "severity": "high",
+        "title": "Missing dependency",
+        "pattern": re.compile(r"no module named|module not found|cannot import name|importerror", re.IGNORECASE),
+        "advice": "A required Python or JavaScript dependency is missing.",
+    },
+    {
+        "id": "syntax",
+        "severity": "high",
+        "title": "Syntax or startup failure",
+        "pattern": re.compile(r"\bsyntaxerror\b|\bindentationerror\b|failed to load plugin", re.IGNORECASE),
+        "advice": "The plugin may not start until its files are fixed or reinstalled.",
+    },
+    {
+        "id": "disk",
+        "severity": "high",
+        "title": "Disk write failure",
+        "pattern": re.compile(r"no space left on device|read-only file system|disk quota", re.IGNORECASE),
+        "advice": "The plugin cannot write to disk.",
+    },
+    {
+        "id": "config",
+        "severity": "medium",
+        "title": "Config parse failure",
+        "pattern": re.compile(r"jsondecodeerror|toml|yaml|parse error|invalid config", re.IGNORECASE),
+        "advice": "A settings or cache file may be corrupt.",
+    },
+    {
+        "id": "network",
+        "severity": "medium",
+        "title": "Network/API failure",
+        "pattern": re.compile(r"connection refused|connection timed out|temporary failure|ssl|certificate|http (4\d\d|5\d\d)|rate limit", re.IGNORECASE),
+        "advice": "The plugin is failing an external request.",
+    },
+    {
+        "id": "steam_api",
+        "severity": "medium",
+        "title": "Steam client API failure",
+        "pattern": re.compile(r"steam(client|ui|webhelper)|cef|websocket|jsbridge", re.IGNORECASE),
+        "advice": "The plugin is failing while talking to Steam UI or CEF.",
+    },
+)
 
 
 class Plugin:
     def __init__(self):
         self._previous_cpu: tuple[int, int] | None = None
         self._previous_processes: dict[int, int] = {}
+        self._plugin_resource_peaks: dict[str, dict[str, float]] = {}
         # Deque for O(1) append and automatic size limiting (circular buffer pattern)
         self._history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
         self._last_update_error = ""
         self._cached_update_status: dict[str, Any] | None = None
         self._last_check_time = 0.0
+        self._auto_update_task: asyncio.Task[None] | None = None
+        self._install_lock = asyncio.Lock()
+        self._monitoring_enabled = False
+        self._monitoring_task: asyncio.Task[None] | None = None
+        self._latest_metrics: dict[str, Any] | None = None
+        self._latest_logs: dict[str, Any] | None = None
+        self._last_log_scan = 0.0
+        self._log_activity: dict[str, dict[str, Any]] = {}
+        self._metrics_lock = asyncio.Lock()
 
     async def _main(self):
         decky.logger.info("Decky Task Manager loaded")
-        # Auto-check for updates on startup (once per 24 hours)
-        asyncio.create_task(self._auto_check_update())
+        self._cleanup_previous_update_artifacts()
+        if AUTO_UPDATE_CHECK_ON_STARTUP and self._should_auto_check():
+            self._auto_update_task = asyncio.create_task(self._auto_check_update())
 
     async def _unload(self):
+        self._monitoring_enabled = False
+        await self._stop_monitoring_task()
+        await self._stop_auto_update_task()
         decky.logger.info("Decky Task Manager unloaded")
 
     async def _uninstall(self):
@@ -66,6 +162,7 @@ class Plugin:
     async def get_snapshot(self) -> dict[str, Any]:
         plugins = self._list_plugins()
         logs = self._scan_logs(plugins)
+        self._latest_logs = logs
         metrics = await self.get_metrics()
 
         return {
@@ -75,6 +172,34 @@ class Plugin:
         }
 
     async def get_metrics(self) -> dict[str, Any]:
+        async with self._metrics_lock:
+            metrics = await self._collect_metrics()
+            self._latest_metrics = metrics
+            return metrics
+
+    async def get_monitoring_state(self) -> dict[str, Any]:
+        if self._monitoring_enabled:
+            self._ensure_monitoring_task()
+
+        return {
+            "enabled": self._monitoring_enabled,
+            "metrics": self._latest_metrics,
+            "logs": self._latest_logs,
+            "pollIntervalMs": int(MONITORING_POLL_SECONDS * 1000),
+        }
+
+    async def set_monitoring(self, enabled: bool) -> dict[str, Any]:
+        self._monitoring_enabled = bool(enabled)
+
+        if self._monitoring_enabled:
+            await self.get_metrics()
+            self._ensure_monitoring_task()
+        else:
+            await self._stop_monitoring_task()
+
+        return await self.get_monitoring_state()
+
+    async def _collect_metrics(self) -> dict[str, Any]:
         """
         Get system and plugin metrics with peak detection.
         Samples multiple times over ~200ms to catch short spikes.
@@ -108,10 +233,10 @@ class Plugin:
                     # Take peak values
                     if plugin["cpu"] > merged_plugins[name]["cpu"]:
                         merged_plugins[name]["cpu"] = plugin["cpu"]
-                        merged_plugins[name]["peakCpu"] = plugin["cpu"]
                     if plugin["memory"] > merged_plugins[name]["memory"]:
                         merged_plugins[name]["memory"] = plugin["memory"]
-                        merged_plugins[name]["peakMemory"] = plugin["memory"]
+                    merged_plugins[name]["peakCpu"] = max(merged_plugins[name]["peakCpu"], plugin["peakCpu"])
+                    merged_plugins[name]["peakMemory"] = max(merged_plugins[name]["peakMemory"], plugin["peakMemory"])
                     # Update spike status if any sample showed spike
                     if plugin["spike"]:
                         merged_plugins[name]["spike"] = True
@@ -135,11 +260,66 @@ class Plugin:
         self._remember(metrics)
         return metrics
 
+    def _ensure_monitoring_task(self) -> None:
+        if self._monitoring_task is not None and not self._monitoring_task.done():
+            return
+
+        self._monitoring_task = asyncio.create_task(self._monitoring_loop())
+
+    async def _stop_monitoring_task(self) -> None:
+        task = self._monitoring_task
+        self._monitoring_task = None
+
+        if task is None or task.done():
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _monitoring_loop(self) -> None:
+        try:
+            while self._monitoring_enabled:
+                await asyncio.sleep(MONITORING_POLL_SECONDS)
+                if self._monitoring_enabled:
+                    try:
+                        await self.get_metrics()
+                    except Exception as error:
+                        decky.logger.warning("Live monitoring sample failed: %s", error)
+
+                now = time.time()
+                if self._monitoring_enabled and now - self._last_log_scan >= LOG_ALERT_POLL_SECONDS:
+                    try:
+                        self._latest_logs = self._scan_logs(self._list_plugins())
+                        self._last_log_scan = now
+                    except Exception as error:
+                        decky.logger.warning("Live monitoring log scan failed: %s", error)
+        except asyncio.CancelledError:
+            raise
+
+    async def _stop_auto_update_task(self) -> None:
+        task = self._auto_update_task
+        self._auto_update_task = None
+
+        if task is None or task.done():
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     async def reset_metrics(self) -> dict[str, Any]:
-        self._previous_cpu = None
-        self._previous_processes = {}
-        # Clear deque instead of reassigning (maintains maxlen property)
-        self._history.clear()
+        async with self._metrics_lock:
+            self._previous_cpu = None
+            self._previous_processes = {}
+            self._plugin_resource_peaks.clear()
+            self._latest_metrics = None
+            # Clear deque instead of reassigning (maintains maxlen property)
+            self._history.clear()
 
         return {
             "ok": True,
@@ -202,11 +382,12 @@ class Plugin:
         settings["disabled_plugins"] = disabled_plugins
         settings_path.write_text(json.dumps(settings, indent=4), encoding="utf-8")
 
-        restarted = self._schedule_loader_restart()
+        restart = self._schedule_loader_restart("plugin disabled")
         return {
             "ok": True,
             "message": f"{name} is disabled.",
-            "restarted": restarted,
+            "restarted": restart["scheduled"],
+            "restart": restart,
         }
 
     async def enable_plugin(self, name: str) -> dict[str, Any]:
@@ -238,26 +419,116 @@ class Plugin:
         settings["disabled_plugins"] = disabled_plugins
         settings_path.write_text(json.dumps(settings, indent=4), encoding="utf-8")
 
-        restarted = self._schedule_loader_restart()
+        restart = self._schedule_loader_restart("plugin enabled")
         return {
             "ok": True,
             "message": f"{name} is enabled.",
-            "restarted": restarted,
+            "restarted": restart["scheduled"],
+            "restart": restart,
         }
 
-    async def check_update(self) -> dict[str, Any]:
-        # Return cached result if checked within last 24 hours
+    async def kill_plugin_processes(self, name: str) -> dict[str, Any]:
+        plugins = self._list_plugins()
+        valid_names = {plugin["name"] for plugin in plugins}
+
+        if name == "Decky Task Manager":
+            return {"ok": False, "message": "Decky Task Manager cannot kill itself."}
+
+        if name not in valid_names:
+            return {"ok": False, "message": f"{name} was not found."}
+
+        current_pid = os.getpid()
+        processes = [
+            process
+            for process in self._read_plugin_processes(plugins)
+            if process["name"] == name and process["pid"] != current_pid
+        ]
+
+        if not processes:
+            return {
+                "ok": True,
+                "message": f"No running processes found for {name}.",
+                "terminated": [],
+                "killed": [],
+                "failed": [],
+            }
+
+        terminated: list[int] = []
+        killed: list[int] = []
+        failed: list[dict[str, Any]] = []
+
+        for process in processes:
+            pid = int(process["pid"])
+            try:
+                os.kill(pid, signal.SIGTERM)
+                terminated.append(pid)
+            except ProcessLookupError:
+                continue
+            except OSError as error:
+                failed.append({"pid": pid, "error": str(error)})
+
+        await asyncio.sleep(0.5)
+
+        sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        for pid in terminated:
+            if not self._pid_is_running(pid):
+                continue
+
+            try:
+                os.kill(pid, sigkill)
+                killed.append(pid)
+            except ProcessLookupError:
+                continue
+            except OSError as error:
+                failed.append({"pid": pid, "error": str(error)})
+
+        ok = len(failed) == 0
+        affected = len(set([*terminated, *killed]))
+        return {
+            "ok": ok,
+            "terminated": terminated,
+            "killed": killed,
+            "failed": failed,
+            "message": (
+                f"Sent kill signal to {affected} {name} process{'es' if affected != 1 else ''}."
+                if ok
+                else f"Could not kill every {name} process."
+            ),
+        }
+
+    async def get_update_status(self) -> dict[str, Any]:
+        current = self._current_version()
         if self._cached_update_status and (time.time() - self._last_check_time) < AUTO_CHECK_INTERVAL:
+            return {
+                **self._cached_update_status,
+                "current": current,
+                "elevated": self._has_elevated_permissions(),
+            }
+
+        return {
+            "ok": True,
+            "current": current,
+            "elevated": self._has_elevated_permissions(),
+            "hasUpdate": False,
+            "canInstall": False,
+            "message": "Ready to check for updates.",
+        }
+
+    async def check_update(self, force: bool = False) -> dict[str, Any]:
+        # Return cached result if checked within last 24 hours
+        if not force and self._cached_update_status and (time.time() - self._last_check_time) < AUTO_CHECK_INTERVAL:
             decky.logger.info("Returning cached update status (checked recently)")
             return self._cached_update_status
 
         current = self._current_version()
+        elevated = self._has_elevated_permissions()
         release = self._latest_release()
         if release is None:
             detail = f" {self._last_update_error}" if self._last_update_error else ""
             result = {
                 "ok": False,
                 "current": current,
+                "elevated": elevated,
                 "hasUpdate": False,
                 "canInstall": False,
                 "message": f"Could not read GitHub releases.{detail}",
@@ -273,11 +544,16 @@ class Plugin:
                 "ok": True,
                 "current": current,
                 "latest": latest,
+                "elevated": elevated,
                 "hasUpdate": has_update,
-                "canInstall": can_install,
+                "canInstall": can_install and elevated,
                 "assetName": asset.get("name") if asset else "",
                 "releaseUrl": release.get("html_url", ""),
-                "message": "Update available." if has_update else "Latest release is already installed.",
+                "message": (
+                    "Update available." if has_update and elevated
+                    else "Root permissions are required to install updates." if has_update
+                    else "Latest release is already installed."
+                ),
             }
 
         # Cache the result
@@ -288,67 +564,90 @@ class Plugin:
         return result
 
     async def install_update(self) -> dict[str, Any]:
-        status = await self.check_update()
-        if not status.get("ok"):
-            return status
+        async with self._install_lock:
+            status = await self.check_update(force=True)
+            if not status.get("ok"):
+                return status
 
-        if not status.get("canInstall"):
-            return {
-                **status,
-                "ok": False,
-                "message": "No release zip was found.",
-            }
+            if not self._has_elevated_permissions():
+                return {
+                    **status,
+                    "ok": False,
+                    "canInstall": False,
+                    "message": "Update install requires elevated Decky permissions.",
+                }
 
-        release = self._latest_release()
-        asset = self._release_asset(release or {})
-        if asset is None:
-            return {
-                **status,
-                "ok": False,
-                "message": "No release zip was found.",
-            }
+            if not status.get("canInstall"):
+                return {
+                    **status,
+                    "ok": False,
+                    "message": "No release zip was found.",
+                }
 
-        try:
-            self._install_release_zip(str(asset["browser_download_url"]))
-        except ValueError as error:
-            decky.logger.exception("Update failed - invalid ZIP structure: %s", error)
-            return {
-                **status,
-                "ok": False,
-                "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
-            }
-        except urllib.error.URLError as error:
-            decky.logger.exception("Update failed - download error: %s", error)
-            return {
-                **status,
-                "ok": False,
-                "message": "Update failed: Could not download release. Check internet connection.",
-            }
-        except zipfile.BadZipFile as error:
-            decky.logger.exception("Update failed - corrupt ZIP: %s", error)
-            return {
-                **status,
-                "ok": False,
-                "message": "Update failed: Downloaded ZIP is corrupted. Try again.",
-            }
-        except OSError as error:
-            decky.logger.exception("Update failed - file system error: %s", error)
-            return {
-                **status,
-                "ok": False,
-                "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
-            }
+            release = self._latest_release()
+            asset = self._release_asset(release or {})
+            if asset is None:
+                return {
+                    **status,
+                    "ok": False,
+                    "message": "No release zip was found.",
+                }
 
-        restarted = self._schedule_loader_restart()
-        return {
-            **status,
-            "ok": True,
-            "restarted": restarted,
-            "message": (
-                "Update installed! Decky will restart now." if restarted
-                else "Update installed! Please restart Steam to apply changes."
-            ),
-        }
+            try:
+                await self._stop_monitoring_task()
+                install_info = self._install_release_zip(str(asset["browser_download_url"]))
+            except ValueError as error:
+                decky.logger.exception("Update failed - invalid ZIP structure: %s", error)
+                return {
+                    **status,
+                    "ok": False,
+                    "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
+                }
+            except urllib.error.URLError as error:
+                decky.logger.exception("Update failed - download error: %s", error)
+                return {
+                    **status,
+                    "ok": False,
+                    "message": "Update failed: Could not download release. Check internet connection.",
+                }
+            except zipfile.BadZipFile as error:
+                decky.logger.exception("Update failed - corrupt ZIP: %s", error)
+                return {
+                    **status,
+                    "ok": False,
+                    "message": "Update failed: Downloaded ZIP is corrupted. Try again.",
+                }
+            except OSError as error:
+                decky.logger.exception("Update failed - file system error: %s", error)
+                return {
+                    **status,
+                    "ok": False,
+                    "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
+                }
+
+            current = self._current_version()
+            latest = str(status.get("latest") or current)
+            restart = self._schedule_loader_restart("plugin updated")
+            result = {
+                **status,
+                **install_info,
+                "ok": True,
+                "current": current,
+                "latest": latest,
+                "hasUpdate": self._is_newer_version(current, latest),
+                "canInstall": bool(status.get("canInstall")),
+                "restarted": restart["scheduled"],
+                "restart": restart,
+                "requiresRestart": True,
+                "message": (
+                    f"Installed {current}. Decky restart scheduled."
+                    if restart["scheduled"]
+                    else f"Installed {current}. Restart Steam or Decky Loader to finish."
+                ),
+            }
+            self._cached_update_status = result
+            self._last_check_time = time.time()
+            return result
 
     async def _auto_check_update(self) -> None:
         """
@@ -450,21 +749,61 @@ class Plugin:
     def _scan_logs(self, plugins: list[dict[str, Any]]) -> dict[str, Any]:
         log_root = Path(decky.DECKY_HOME) / "logs"
         plugin_rows: list[dict[str, Any]] = []
-        totals = {"errors": 0, "files": 0}
+        totals = {
+            "errors": 0,
+            "files": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "alerts": 0,
+            "serious": 0,
+            "noisyPlugins": 0,
+        }
 
         for plugin in plugins:
             paths = self._log_paths_for_plugin(log_root, plugin)
             errors = 0
             examples: list[str] = []
             grouped: dict[str, dict[str, Any]] = {}
+            issue_map: dict[str, dict[str, Any]] = {}
+            plugin_rate = {
+                "bytesPerSecond": 0.0,
+                "linesPerSecond": 0.0,
+                "errorsPerSecond": 0.0,
+                "active": False,
+            }
 
             for log_path in paths:
+                rate = self._log_rate(log_path)
+                plugin_rate["bytesPerSecond"] += rate["bytesPerSecond"]
+                plugin_rate["linesPerSecond"] += rate["linesPerSecond"]
+                plugin_rate["errorsPerSecond"] += rate["errorsPerSecond"]
+
                 lines = self._tail_lines(log_path)
                 file_errors = [line.strip() for line in lines if ERROR_PATTERN.search(line)]
                 errors += len(file_errors)
                 totals["files"] += 1
 
                 for line in file_errors:
+                    for issue in self._known_issues_for_line(line, plugin):
+                        current_issue = issue_map.setdefault(
+                            issue["id"],
+                            {
+                                "id": issue["id"],
+                                "severity": issue["severity"],
+                                "title": issue["title"],
+                                "advice": issue["advice"],
+                                "count": 0,
+                                "files": set(),
+                                "examples": [],
+                            },
+                        )
+                        current_issue["count"] += 1
+                        current_issue["files"].add(str(log_path.relative_to(log_root)))
+                        if len(current_issue["examples"]) < 2:
+                            current_issue["examples"].append(line[-220:])
+
                     key = self._normalize_error(line)
                     current = grouped.setdefault(
                         key,
@@ -481,6 +820,44 @@ class Plugin:
                         examples.append(line[-220:])
 
             totals["errors"] += errors
+
+            plugin_rate = {
+                **plugin_rate,
+                "bytesPerSecond": round(plugin_rate["bytesPerSecond"], 1),
+                "linesPerSecond": round(plugin_rate["linesPerSecond"], 1),
+                "errorsPerSecond": round(plugin_rate["errorsPerSecond"], 2),
+            }
+            plugin_rate["active"] = (
+                plugin_rate["bytesPerSecond"] >= LOG_SPAM_BYTES_PER_SECOND
+                or plugin_rate["linesPerSecond"] >= LOG_SPAM_LINES_PER_SECOND
+                or plugin_rate["errorsPerSecond"] >= LOG_SPAM_ERRORS_PER_SECOND
+            )
+
+            alerts = self._log_rate_alerts(plugin_rate)
+            known_issues = [
+                {
+                    **issue,
+                    "files": sorted(issue["files"]),
+                }
+                for issue in issue_map.values()
+            ]
+            known_issues.sort(
+                key=lambda issue: (
+                    -SEVERITY_RANK.get(str(issue["severity"]), 0),
+                    -int(issue["count"]),
+                    str(issue["title"]).lower(),
+                )
+            )
+
+            severity = self._plugin_log_severity(errors, known_issues, alerts)
+            if severity in totals:
+                totals[severity] += 1
+            if SEVERITY_RANK.get(severity, 0) >= SEVERITY_RANK["high"]:
+                totals["serious"] += 1
+            if alerts:
+                totals["alerts"] += len(alerts)
+            if plugin_rate["active"]:
+                totals["noisyPlugins"] += 1
             
             # Use heap to get top N error groups efficiently (DSA: Min-Heap)
             # nlargest is O(n log k) instead of O(n log n) for full sort
@@ -498,11 +875,146 @@ class Plugin:
                     "files": len(paths),
                     "examples": examples,
                     "groups": top_groups,
+                    "knownIssues": known_issues,
+                    "alerts": alerts,
+                    "rate": plugin_rate,
+                    "severity": severity,
+                    "serious": SEVERITY_RANK.get(severity, 0) >= SEVERITY_RANK["high"],
                 }
             )
 
         plugin_rows.sort(key=lambda item: (-item["errors"], item["name"].lower()))
         return {"plugins": plugin_rows, "totals": totals}
+
+    def _known_issues_for_line(self, line: str, plugin: dict[str, Any]) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        plugin_name = str(plugin.get("name", "")).lower()
+        plugin_folder = str(plugin.get("folder", "")).lower()
+
+        for rule in KNOWN_ERROR_RULES:
+            plugin_filters = rule.get("plugins")
+            if plugin_filters and not any(
+                str(name).lower() in plugin_name or str(name).lower() in plugin_folder
+                for name in plugin_filters
+            ):
+                continue
+
+            pattern = rule["pattern"]
+            if pattern.search(line):
+                matches.append(
+                    {
+                        "id": rule["id"],
+                        "severity": rule["severity"],
+                        "title": rule["title"],
+                        "advice": rule["advice"],
+                    }
+                )
+
+        return matches
+
+    def _log_rate(self, path: Path) -> dict[str, float]:
+        now = time.time()
+        key = str(path)
+
+        try:
+            stat = path.stat()
+        except OSError:
+            return {"bytesPerSecond": 0.0, "linesPerSecond": 0.0, "errorsPerSecond": 0.0}
+
+        previous = self._log_activity.get(key)
+        self._log_activity[key] = {
+            "size": stat.st_size,
+            "checkedAt": now,
+            "mtime": stat.st_mtime,
+        }
+
+        if previous is None:
+            return {"bytesPerSecond": 0.0, "linesPerSecond": 0.0, "errorsPerSecond": 0.0}
+
+        elapsed = max(now - float(previous.get("checkedAt", now)), 0.001)
+        previous_size = int(previous.get("size", stat.st_size))
+        if stat.st_size < previous_size:
+            return {"bytesPerSecond": 0.0, "linesPerSecond": 0.0, "errorsPerSecond": 0.0}
+
+        delta_bytes = stat.st_size - previous_size
+        if delta_bytes <= 0:
+            return {"bytesPerSecond": 0.0, "linesPerSecond": 0.0, "errorsPerSecond": 0.0}
+
+        appended = self._read_log_delta(path, previous_size, delta_bytes)
+        lines = appended.decode("utf-8", errors="replace").splitlines()
+        error_lines = [line for line in lines if ERROR_PATTERN.search(line)]
+
+        return {
+            "bytesPerSecond": delta_bytes / elapsed,
+            "linesPerSecond": len(lines) / elapsed,
+            "errorsPerSecond": len(error_lines) / elapsed,
+        }
+
+    def _read_log_delta(self, path: Path, previous_size: int, delta_bytes: int) -> bytes:
+        try:
+            with path.open("rb") as handle:
+                if delta_bytes > MAX_LOG_BYTES:
+                    handle.seek(max(path.stat().st_size - MAX_LOG_BYTES, 0))
+                    return handle.read(MAX_LOG_BYTES)
+
+                handle.seek(previous_size)
+                return handle.read(delta_bytes)
+        except OSError:
+            return b""
+
+    def _log_rate_alerts(self, rate: dict[str, Any]) -> list[dict[str, Any]]:
+        alerts: list[dict[str, Any]] = []
+
+        if rate["errorsPerSecond"] >= LOG_SPAM_ERRORS_PER_SECOND:
+            alerts.append(
+                {
+                    "id": "error_spam",
+                    "severity": "high",
+                    "title": "Log errors are repeating",
+                    "message": f"{rate['errorsPerSecond']:.1f} errors/sec",
+                }
+            )
+
+        if rate["linesPerSecond"] >= LOG_SPAM_LINES_PER_SECOND:
+            alerts.append(
+                {
+                    "id": "line_spam",
+                    "severity": "medium",
+                    "title": "Log is being written constantly",
+                    "message": f"{rate['linesPerSecond']:.1f} lines/sec",
+                }
+            )
+
+        if rate["bytesPerSecond"] >= LOG_SPAM_BYTES_PER_SECOND:
+            alerts.append(
+                {
+                    "id": "byte_spam",
+                    "severity": "medium",
+                    "title": "Log file is growing quickly",
+                    "message": f"{round(rate['bytesPerSecond'] / 1024, 1)} KB/sec",
+                }
+            )
+
+        return alerts
+
+    def _plugin_log_severity(
+        self,
+        errors: int,
+        known_issues: list[dict[str, Any]],
+        alerts: list[dict[str, Any]],
+    ) -> str:
+        severity = "info"
+        for issue in [*known_issues, *alerts]:
+            issue_severity = str(issue.get("severity", "info"))
+            if SEVERITY_RANK.get(issue_severity, 0) > SEVERITY_RANK.get(severity, 0):
+                severity = issue_severity
+
+        if severity == "info" and errors >= 50:
+            return "medium"
+        if severity == "info" and errors > 0:
+            return "low"
+
+        return severity
 
     def _log_paths_for_plugin(self, log_root: Path, plugin: dict[str, Any]) -> list[Path]:
         if not log_root.exists():
@@ -617,6 +1129,17 @@ class Plugin:
 
         return None
 
+    def _pid_is_running(self, pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
     def _plugin_metrics(
         self,
         processes: list[dict[str, Any]],
@@ -651,11 +1174,22 @@ class Plugin:
         history_peaks = self._plugin_history_peaks()
         for row in grouped.values():
             row["cpu"] = round(row["cpu"], 1)
-            row["peakCpu"] = max(row["cpu"], history_peaks.get(row["name"], {}).get("cpu", 0.0))
-            row["peakMemory"] = max(row["memory"], history_peaks.get(row["name"], {}).get("memory", 0))
+            name = row["name"]
+            stored_peaks = self._plugin_resource_peaks.setdefault(name, {"cpu": 0.0, "memory": 0.0})
+            previous_peak_cpu = max(stored_peaks.get("cpu", 0.0), history_peaks.get(name, {}).get("cpu", 0.0))
+            previous_peak_memory = max(stored_peaks.get("memory", 0.0), history_peaks.get(name, {}).get("memory", 0.0))
 
-            cpu_spike = row["cpu"] >= PLUGIN_CPU_SPIKE and row["cpu"] >= row["peakCpu"] * 0.85
-            memory_spike = row["memory"] >= row["peakMemory"] + PLUGIN_MEMORY_SPIKE_MB
+            row["peakCpu"] = round(max(row["cpu"], previous_peak_cpu), 1)
+            row["peakMemory"] = int(max(row["memory"], previous_peak_memory))
+            stored_peaks["cpu"] = row["peakCpu"]
+            stored_peaks["memory"] = row["peakMemory"]
+
+            cpu_spike = row["cpu"] >= PLUGIN_CPU_SPIKE and (
+                previous_peak_cpu <= 0 or row["cpu"] >= previous_peak_cpu * 0.85
+            )
+            memory_spike = row["memory"] >= PLUGIN_MEMORY_SPIKE_MB and (
+                previous_peak_memory <= 0 or row["memory"] >= previous_peak_memory + PLUGIN_MEMORY_SPIKE_MB
+            )
 
             if cpu_spike:
                 row["spike"] = True
@@ -771,6 +1305,12 @@ class Plugin:
         package_path = Path(decky.DECKY_PLUGIN_DIR) / "package.json"
         return self._package_version(package_path)
 
+    def _has_elevated_permissions(self) -> bool:
+        if not hasattr(os, "geteuid"):
+            return True
+
+        return os.geteuid() == 0
+
     def _parse_version(self, version: str) -> tuple[int, ...]:
         """
         Parse semantic version string to tuple for comparison (DSA: Tuple Comparison).
@@ -869,9 +1409,11 @@ class Plugin:
 
         return None
 
-    def _install_release_zip(self, url: str) -> None:
+    def _install_release_zip(self, url: str) -> dict[str, Any]:
         decky.logger.info(f"Starting update installation from: {url}")
-        plugin_dir = Path(decky.DECKY_PLUGIN_DIR)
+        plugin_dir = Path(decky.DECKY_PLUGIN_DIR).resolve()
+        plugin_parent = plugin_dir.parent
+        staging_dir = plugin_parent / f".{plugin_dir.name}.update-{os.getpid()}-{int(time.time())}"
         decky.logger.info(f"Plugin directory: {plugin_dir}")
         
         request = urllib.request.Request(
@@ -903,32 +1445,49 @@ class Plugin:
                 raise ValueError("release zip did not contain a Decky plugin")
             
             decky.logger.info(f"Found plugin at: {extracted_plugin}")
+            self._validate_extracted_plugin(extracted_plugin)
 
             backup_dir = plugin_dir.with_name(f"{plugin_dir.name}.previous")
+
+            if staging_dir.exists():
+                decky.logger.info(f"Removing stale staging directory: {staging_dir}")
+                shutil.rmtree(staging_dir)
+
+            decky.logger.info(f"Staging updated plugin at: {staging_dir}")
+            shutil.copytree(
+                extracted_plugin,
+                staging_dir,
+                symlinks=True,
+                ignore=shutil.ignore_patterns("*.log", "__pycache__", ".last_update_check"),
+            )
+            self._validate_extracted_plugin(staging_dir)
+
             if backup_dir.exists():
                 decky.logger.info(f"Removing old backup: {backup_dir}")
                 shutil.rmtree(backup_dir)
 
-            if plugin_dir.exists():
-                decky.logger.info(f"Backing up current plugin to: {backup_dir}")
-                shutil.copytree(plugin_dir, backup_dir, ignore=shutil.ignore_patterns("*.log"))
-            
-            decky.logger.info("Installing updated files...")
-            for item in extracted_plugin.iterdir():
-                target = plugin_dir / item.name
-                if target.exists():
-                    if target.is_dir():
-                        shutil.rmtree(target)
-                    else:
-                        target.unlink()
-
-                if item.is_dir():
-                    shutil.copytree(item, target)
-                else:
-                    shutil.copy2(item, target)
-                decky.logger.info(f"  Installed: {item.name}")
+            decky.logger.info("Replacing plugin directory")
+            moved_existing = False
+            try:
+                if plugin_dir.exists():
+                    plugin_dir.rename(backup_dir)
+                    moved_existing = True
+                staging_dir.rename(plugin_dir)
+            except OSError:
+                decky.logger.exception("Update replacement failed, attempting rollback")
+                if moved_existing and plugin_dir.exists():
+                    shutil.rmtree(plugin_dir)
+                if moved_existing and backup_dir.exists() and not plugin_dir.exists():
+                    backup_dir.rename(plugin_dir)
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
+                raise
             
             decky.logger.info("Update installation complete!")
+            return {
+                "installedVersion": self._package_version(plugin_dir / "package.json"),
+                "backupPath": str(backup_dir),
+            }
 
     def _find_extracted_plugin(self, root: Path) -> Path | None:
         for candidate in [root, *root.iterdir()]:
@@ -937,6 +1496,32 @@ class Plugin:
             if (candidate / "plugin.json").exists() and (candidate / "package.json").exists():
                 return candidate
         return None
+
+    def _validate_extracted_plugin(self, plugin_path: Path) -> None:
+        manifest_path = plugin_path / "plugin.json"
+        package_path = plugin_path / "package.json"
+        frontend_path = plugin_path / "dist" / "index.js"
+        backend_path = plugin_path / "main.py"
+
+        for required_path in [manifest_path, package_path, frontend_path, backend_path]:
+            if not required_path.exists():
+                raise ValueError(f"release zip is missing {required_path.relative_to(plugin_path)}")
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"release plugin.json is invalid: {error}") from error
+
+        if str(manifest.get("name", "")) != "Decky Task Manager":
+            raise ValueError("release zip is not Decky Task Manager")
+
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"release package.json is invalid: {error}") from error
+
+        if not package.get("version"):
+            raise ValueError("release package.json does not contain a version")
 
     def _safe_extract(self, archive: zipfile.ZipFile, target: Path) -> None:
         target.mkdir(parents=True, exist_ok=True)
@@ -985,35 +1570,133 @@ class Plugin:
         
         decky.logger.info(f"Download successful via curl")
 
-    def _schedule_loader_restart(self) -> bool:
-        decky.logger.info("Attempting to restart Decky Loader...")
-        
-        # Try multiple restart commands, fire-and-forget with proper detachment
+    def _schedule_loader_restart(self, reason: str) -> dict[str, Any]:
+        decky.logger.info("Scheduling Decky Loader restart: %s", reason)
+
+        unit = f"decky-task-manager-restart-{int(time.time())}"
         commands = [
-            "sleep 2 && systemctl restart plugin_loader",
-            "sleep 2 && systemctl --user restart plugin_loader",
-            "sleep 2 && systemctl restart plugin_loader.service",
-            "sleep 2 && systemctl --user restart plugin_loader.service",
+            {
+                "method": "systemd-run-user",
+                "argv": [
+                    "systemd-run",
+                    "--user",
+                    "--on-active=2",
+                    f"--unit={unit}",
+                    "systemctl",
+                    "--user",
+                    "restart",
+                    "plugin_loader.service",
+                ],
+            },
+            {
+                "method": "systemd-run-system",
+                "argv": [
+                    "systemd-run",
+                    "--on-active=2",
+                    f"--unit={unit}",
+                    "systemctl",
+                    "restart",
+                    "plugin_loader.service",
+                ],
+            },
         ]
-        
-        for cmd in commands:
+
+        for command in commands:
             try:
-                decky.logger.info(f"Trying: {cmd}")
-                # Use Popen with full detachment - don't wait for result
-                process = subprocess.Popen(
-                    ["bash", "-c", cmd],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,  # Fully detach from parent
-                    preexec_fn=os.setpgrp if hasattr(os, 'setpgrp') else None,  # New process group
+                result = subprocess.run(
+                    command["argv"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
-                decky.logger.info(f"✓ Restart scheduled (detached PID: {process.pid})")
-                # Return immediately - don't wait for the restart
-                return True
-            except Exception as error:
-                decky.logger.warning(f"Exception with '{cmd}': {error}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                decky.logger.warning("%s restart scheduling failed: %s", command["method"], error)
                 continue
-        
+
+            if result.returncode == 0:
+                decky.logger.info("Restart scheduled with %s", command["method"])
+                return {
+                    "scheduled": True,
+                    "method": command["method"],
+                    "message": "Decky Loader restart scheduled.",
+                }
+
+            decky.logger.warning(
+                "%s exited %s: %s",
+                command["method"],
+                result.returncode,
+                result.stderr.strip()[-160:],
+            )
+
+        fallback = self._schedule_loader_restart_helper()
+        if fallback["scheduled"]:
+            return fallback
+
         decky.logger.error("All restart methods failed - manual restart required")
-        return False
+        return {
+            "scheduled": False,
+            "method": "",
+            "message": "Could not schedule Decky Loader restart.",
+        }
+
+    def _schedule_loader_restart_helper(self) -> dict[str, Any]:
+        helper_path = Path(tempfile.gettempdir()) / f"decky-task-manager-restart-{os.getpid()}-{int(time.time())}.sh"
+        helper = """#!/usr/bin/env bash
+sleep 2
+systemctl --user restart plugin_loader.service \
+  || systemctl --user restart plugin_loader \
+  || systemctl restart plugin_loader.service \
+  || systemctl restart plugin_loader
+rm -f "$0"
+"""
+
+        try:
+            helper_path.write_text(helper, encoding="utf-8")
+            helper_path.chmod(0o755)
+            command = f"nohup {shlex.quote(str(helper_path))} >/dev/null 2>&1 &"
+            result = subprocess.run(
+                ["bash", "-lc", command],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            decky.logger.warning("Helper restart scheduling failed: %s", error)
+            return {"scheduled": False, "method": "helper", "message": str(error)}
+
+        if result.returncode != 0:
+            decky.logger.warning("Helper restart scheduling exited %s: %s", result.returncode, result.stderr.strip()[-160:])
+            try:
+                helper_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return {
+                "scheduled": False,
+                "method": "helper",
+                "message": result.stderr.strip()[-160:],
+            }
+
+        return {
+            "scheduled": True,
+            "method": "helper",
+            "message": "Decky Loader restart helper started.",
+        }
+
+    def _cleanup_previous_update_artifacts(self) -> None:
+        plugin_dir = Path(decky.DECKY_PLUGIN_DIR)
+        plugin_parent = plugin_dir.parent
+        backup_dir = plugin_dir.with_name(f"{plugin_dir.name}.previous")
+
+        for path in [backup_dir, *plugin_parent.glob(f".{plugin_dir.name}.update-*")]:
+            if not path.exists():
+                continue
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                decky.logger.info("Removed previous update artifact: %s", path)
+            except OSError as error:
+                decky.logger.warning("Failed to remove update artifact %s: %s", path, error)

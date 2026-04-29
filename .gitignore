@@ -41,6 +41,7 @@ dist/
 *.zip
 
 __pycache__/
+.test-tmp/
 
 /.yalc
 yalc.lock

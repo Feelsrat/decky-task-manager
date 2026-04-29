@@ -8,7 +8,7 @@ import {
   staticClasses,
 } from "@decky/ui";
 import { callable, definePlugin, toaster } from "@decky/api";
-import { useEffect, useState, FC } from "react";
+import { useEffect, useRef, useState, FC, ReactNode } from "react";
 import {
   FaBan,
   FaCheck,
@@ -19,18 +19,82 @@ import {
   FaMicrochip,
   FaMemory,
   FaPlay,
+  FaTimes,
 } from "react-icons/fa";
 
 const POLL_MS = 1000; // Poll every 1s - backend does 4x micro-sampling (50ms) to catch sharp spikes
+
+const severityRank: Record<Severity, number> = {
+  info: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function severityColor(severity: Severity = "info") {
+  switch (severity) {
+    case "critical":
+      return "#ff5f57";
+    case "high":
+      return "#ff8a3d";
+    case "medium":
+      return "#f1c40f";
+    case "low":
+      return "#8ab4f8";
+    default:
+      return "rgba(255,255,255,0.72)";
+  }
+}
 
 // Types
 type PluginMetrics = {
   name: string;
   cpu: number;
   memory: number;
+  peakCpu: number;
+  peakMemory: number;
   processes: number;
   spike: boolean;
   spikeReason: string;
+};
+
+type Severity = "info" | "low" | "medium" | "high" | "critical";
+
+type KnownIssue = {
+  id: string;
+  severity: Severity;
+  title: string;
+  advice: string;
+  count: number;
+  files: string[];
+  examples: string[];
+};
+
+type LogAlert = {
+  id: string;
+  severity: Severity;
+  title: string;
+  message: string;
+};
+
+type LogRate = {
+  bytesPerSecond: number;
+  linesPerSecond: number;
+  errorsPerSecond: number;
+  active: boolean;
+};
+
+type PluginLogs = {
+  name?: string;
+  folder?: string;
+  errors: number;
+  examples: string[];
+  knownIssues?: KnownIssue[];
+  alerts?: LogAlert[];
+  rate?: LogRate;
+  severity?: Severity;
+  serious?: boolean;
 };
 
 type PluginRow = {
@@ -38,17 +102,25 @@ type PluginRow = {
   name: string;
   version: string;
   disabled: boolean;
-  logs?: {
-    errors: number;
-    examples: string[];
-  };
+  logs?: PluginLogs;
   metrics?: PluginMetrics;
 };
 
 type Snapshot = {
   plugins: PluginRow[];
   logs: {
-    totals: { errors: number };
+    plugins: PluginLogs[];
+    totals: {
+      errors: number;
+      files?: number;
+      critical?: number;
+      high?: number;
+      medium?: number;
+      low?: number;
+      alerts?: number;
+      serious?: number;
+      noisyPlugins?: number;
+    };
   };
   metrics: {
     cpu: number;
@@ -58,17 +130,35 @@ type Snapshot = {
 };
 
 type ActionResult = { ok: boolean; message: string };
-type UpdateStatus = ActionResult & { current?: string; latest?: string; hasUpdate?: boolean; canInstall?: boolean };
+type UpdateStatus = ActionResult & {
+  current?: string;
+  latest?: string;
+  elevated?: boolean;
+  hasUpdate?: boolean;
+  canInstall?: boolean;
+  installedVersion?: string;
+  requiresRestart?: boolean;
+  restarted?: boolean;
+};
+type MonitoringState = {
+  enabled: boolean;
+  metrics?: Snapshot["metrics"] | null;
+  logs?: Snapshot["logs"] | null;
+  pollIntervalMs?: number;
+};
 
 // API Calls
 const getSnapshot = callable<[], Snapshot>("get_snapshot");
-const getMetrics = callable<[], any>("get_metrics");
 const clearLogs = callable<[name?: string], ActionResult>("clear_logs");
 const disablePlugin = callable<[name: string], ActionResult>("disable_plugin");
 const enablePlugin = callable<[name: string], ActionResult>("enable_plugin");
+const killPluginProcesses = callable<[name: string], ActionResult>("kill_plugin_processes");
 const resetMetrics = callable<[], ActionResult>("reset_metrics");
-const checkUpdate = callable<[], UpdateStatus>("check_update");
+const getUpdateStatus = callable<[], UpdateStatus>("get_update_status");
+const checkUpdate = callable<[force?: boolean], UpdateStatus>("check_update");
 const installUpdate = callable<[], UpdateStatus>("install_update");
+const getMonitoringState = callable<[], MonitoringState>("get_monitoring_state");
+const setMonitoringEnabled = callable<[enabled: boolean], MonitoringState>("set_monitoring");
 
 // Main Hook
 function useTaskManager() {
@@ -76,8 +166,39 @@ function useTaskManager() {
   const [monitoring, setMonitoring] = useState(false); // OFF by default to reduce overhead
   const [loading, setLoading] = useState(false);
   const [busyPlugin, setBusyPlugin] = useState<string>();
+  const [killingPlugin, setKillingPlugin] = useState<string>();
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
   const [updating, setUpdating] = useState(false);
+
+  const applyMetrics = (metrics: Snapshot["metrics"]) => {
+    setSnapshot((current) => {
+      if (!current) return current;
+
+      return {
+        ...current,
+        metrics,
+        plugins: current.plugins.map((p) => ({
+          ...p,
+          metrics: metrics.plugins.find((m) => m.name === p.name) || p.metrics,
+        })),
+      };
+    });
+  };
+
+  const applyLogs = (logs: Snapshot["logs"]) => {
+    setSnapshot((current) => {
+      if (!current) return current;
+
+      return {
+        ...current,
+        logs,
+        plugins: current.plugins.map((p) => ({
+          ...p,
+          logs: logs.plugins.find((row) => row.name === p.name) || p.logs,
+        })),
+      };
+    });
+  };
 
   const refresh = async () => {
     try {
@@ -88,22 +209,40 @@ function useTaskManager() {
     }
   };
 
+  const syncMonitoringState = async () => {
+    const state = await getMonitoringState();
+    setMonitoring(state.enabled);
+    if (state.metrics) {
+      applyMetrics(state.metrics);
+    }
+    if (state.logs) {
+      applyLogs(state.logs);
+    }
+    return state;
+  };
+
   const refreshMetrics = async () => {
     if (!monitoring) return;
     try {
-      const metrics = await getMetrics();
-      if (snapshot) {
-        setSnapshot({
-          ...snapshot,
-          metrics,
-          plugins: snapshot.plugins.map((p) => ({
-            ...p,
-            metrics: metrics.plugins.find((m: PluginMetrics) => m.name === p.name) || p.metrics,
-          })),
-        });
-      }
+      const state = await syncMonitoringState();
+      if (!state.enabled) return;
     } catch {
       // Silently fail metric updates
+    }
+  };
+
+  const handleMonitoringChange = async (enabled: boolean) => {
+    const previous = monitoring;
+    setMonitoring(enabled);
+    try {
+      const state = await setMonitoringEnabled(enabled);
+      setMonitoring(state.enabled);
+      if (state.metrics) {
+        applyMetrics(state.metrics);
+      }
+    } catch {
+      setMonitoring(previous);
+      toaster.toast({ title: "Error", body: "Failed to update live monitoring" });
     }
   };
 
@@ -136,12 +275,35 @@ function useTaskManager() {
     }
   };
 
+  const handleKillPlugin = async (name: string) => {
+    if (name === "Decky Task Manager") {
+      toaster.toast({ title: "Error", body: "Cannot kill itself" });
+      return;
+    }
+
+    setKillingPlugin(name);
+    try {
+      const result = await killPluginProcesses(name);
+      toaster.toast({ title: result.ok ? "Process Signal Sent" : "Error", body: result.message });
+      await refresh();
+      await syncMonitoringState();
+    } catch {
+      toaster.toast({ title: "Error", body: `Failed to kill ${name}` });
+    } finally {
+      setKillingPlugin(undefined);
+    }
+  };
+
   const handleTestMode = async () => {
     setLoading(true);
     try {
       await clearLogs();
       await resetMetrics();
-      setMonitoring(true);
+      const state = await setMonitoringEnabled(true);
+      setMonitoring(state.enabled);
+      if (state.metrics) {
+        applyMetrics(state.metrics);
+      }
       toaster.toast({ title: "Test Mode", body: "Logs cleared, metrics reset" });
       await refresh();
     } catch {
@@ -154,7 +316,7 @@ function useTaskManager() {
   const handleCheckUpdate = async () => {
     setUpdating(true);
     try {
-      const result = await checkUpdate();
+      const result = await checkUpdate(true);
       setUpdateStatus(result);
       toaster.toast({ title: "Update Check", body: result.message });
     } catch {
@@ -168,7 +330,13 @@ function useTaskManager() {
     setUpdating(true);
     try {
       const result = await installUpdate();
+      setUpdateStatus(result);
       toaster.toast({ title: result.ok ? "Success" : "Error", body: result.message });
+      if (result.ok) {
+        window.setTimeout(() => {
+          getUpdateStatus().then(setUpdateStatus).catch(() => undefined);
+        }, 2500);
+      }
     } catch {
       toaster.toast({ title: "Error", body: "Failed to install update" });
     } finally {
@@ -178,38 +346,35 @@ function useTaskManager() {
 
   useEffect(() => {
     setLoading(true);
-    refresh().finally(() => setLoading(false));
-    
-    // Auto-check for updates on startup (uses 24-hour cache)
-    checkUpdate().then((result) => {
-      setUpdateStatus(result);
-      if (result.hasUpdate) {
-        toaster.toast({ 
-          title: "Update Available", 
-          body: `Version ${result.latest} is available` 
-        });
-      }
-    }).catch(() => {
-      // Silently ignore update check failures
-    });
+    Promise.all([
+      refresh(),
+      syncMonitoringState(),
+      getUpdateStatus().then(setUpdateStatus),
+    ])
+      .catch(() => {
+        toaster.toast({ title: "Error", body: "Failed to load monitoring state" });
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
     if (!monitoring) return;
     const timer = setInterval(refreshMetrics, POLL_MS);
     return () => clearInterval(timer);
-  }, [monitoring, snapshot]);
+  }, [monitoring]);
 
   return {
     snapshot,
     monitoring,
-    setMonitoring,
+    setMonitoring: handleMonitoringChange,
     loading,
     busyPlugin,
+    killingPlugin,
     updateStatus,
     updating,
     handleClearLogs,
     handleTogglePlugin,
+    handleKillPlugin,
     handleTestMode,
     handleCheckUpdate,
     handleInstallUpdate,
@@ -219,7 +384,7 @@ function useTaskManager() {
 
 // Progress Bar Component
 const ProgressBar: FC<{ value: number; color?: string; danger?: boolean }> = ({ value, color, danger }) => (
-  <Focusable style={{ marginTop: "8px" }}>
+  <div style={{ padding: "4px 16px 10px" }}>
     <div
       style={{
         height: "8px",
@@ -237,13 +402,82 @@ const ProgressBar: FC<{ value: number; color?: string; danger?: boolean }> = ({ 
         }}
       />
     </div>
-  </Focusable>
+  </div>
 );
+
+const SquareIconButton: FC<{
+  label: string;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}> = ({ label, disabled, danger, onClick, children }) => {
+  const activate = () => {
+    if (!disabled) onClick();
+  };
+
+  return (
+    <Focusable
+      role="button"
+      aria-label={label}
+      aria-disabled={disabled}
+      title={label}
+      onActivate={activate}
+      onClick={activate}
+      style={{
+        width: "32px",
+        minWidth: "32px",
+        height: "32px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: "4px",
+        background: danger ? "rgba(231, 76, 60, 0.22)" : "rgba(255,255,255,0.10)",
+        color: danger ? "#ff8a80" : "rgba(255,255,255,0.88)",
+        opacity: disabled ? 0.45 : 1,
+      }}
+    >
+      {children}
+    </Focusable>
+  );
+};
 
 // Main Dashboard Component
 const Dashboard: FC = () => {
   const state = useTaskManager();
   const [activeTab, setActiveTab] = useState<"overview" | "plugins" | "logs">("overview");
+  const alertedLogKeys = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const plugins = state.snapshot?.plugins || [];
+    for (const plugin of plugins) {
+      const logs = plugin.logs;
+      if (!logs) continue;
+
+      for (const issue of logs.knownIssues || []) {
+        if (severityRank[issue.severity] < severityRank.high) continue;
+        const key = `${plugin.name}:issue:${issue.id}`;
+        if (alertedLogKeys.current.has(key)) continue;
+        alertedLogKeys.current.add(key);
+        toaster.toast({
+          title: `${plugin.name}: ${issue.title}`,
+          body: issue.advice,
+          critical: issue.severity === "critical",
+        });
+      }
+
+      for (const alert of logs.alerts || []) {
+        const key = `${plugin.name}:alert:${alert.id}`;
+        if (alertedLogKeys.current.has(key)) continue;
+        alertedLogKeys.current.add(key);
+        toaster.toast({
+          title: `${plugin.name}: ${alert.title}`,
+          body: alert.message,
+          critical: alert.severity === "high" || alert.severity === "critical",
+        });
+      }
+    }
+  }, [state.snapshot?.logs]);
 
   if (state.loading && !state.snapshot) {
     return (
@@ -257,9 +491,11 @@ const Dashboard: FC = () => {
 
   const metrics = state.snapshot?.metrics;
   const plugins = state.snapshot?.plugins || [];
-  const errorCount = state.snapshot?.logs.totals.errors || 0;
+  const logTotals = state.snapshot?.logs.totals;
+  const errorCount = logTotals?.errors || 0;
   const activePlugins = plugins.filter((p) => (p.metrics?.processes || 0) > 0);
   const errorPlugins = plugins.filter((p) => (p.logs?.errors || 0) > 0);
+  const alertPlugins = plugins.filter((p) => p.logs?.serious || (p.logs?.alerts?.length || 0) > 0);
 
   // Calculate total plugin resource usage
   const totalPluginCpu = activePlugins.reduce((sum, p) => sum + (p.metrics?.cpu || 0), 0);
@@ -305,29 +541,54 @@ const Dashboard: FC = () => {
                 <FaVial /> Start Test Mode
               </ButtonItem>
             </PanelSectionRow>
-            <div style={{ padding: "8px 16px", fontSize: "12px", opacity: 0.7, lineHeight: 1.4 }}>
-              Test mode clears logs and metrics, then starts monitoring. Use this to reproduce issues.
-            </div>
+            <PanelSectionRow>
+              <Field
+                focusable
+                label="Test Mode"
+                description="Clears logs and metric peaks, then starts fresh monitoring."
+              />
+            </PanelSectionRow>
             {!state.monitoring && (
-              <div style={{ 
-                padding: "8px 16px", 
-                fontSize: "12px", 
-                color: "#f39c12", 
-                lineHeight: 1.4,
-                background: "rgba(243, 156, 18, 0.1)",
-                borderRadius: "4px",
-                margin: "8px 16px"
-              }}>
-                ⚠️ Live monitoring is OFF. CPU/RAM metrics are snapshots only and may be outdated.
-              </div>
+              <PanelSectionRow>
+                <Field
+                  focusable
+                  label="Live monitoring is off"
+                  description="CPU/RAM metrics are snapshots only and may be outdated."
+                >
+                  <div style={{ color: "#f39c12", fontWeight: 600 }}>OFF</div>
+                </Field>
+              </PanelSectionRow>
             )}
           </PanelSection>
 
+          {alertPlugins.length > 0 && (
+            <PanelSection title={`Alerts (${(logTotals?.serious || 0) + (logTotals?.alerts || 0)})`}>
+              {alertPlugins.slice(0, 4).map((plugin) => {
+                const logs = plugin.logs;
+                const topIssue = logs?.knownIssues?.[0];
+                const topAlert = logs?.alerts?.[0];
+                const severity = logs?.severity || topIssue?.severity || topAlert?.severity || "info";
+                const title = topIssue?.title || topAlert?.title || "Log issue";
+                const description = topIssue?.advice || topAlert?.message || `${logs?.errors || 0} errors found`;
+
+                return (
+                  <PanelSectionRow key={plugin.name}>
+                    <Field focusable label={`${plugin.name}: ${title}`} description={description}>
+                      <div style={{ color: severityColor(severity), fontWeight: 700, textTransform: "capitalize" }}>
+                        {severity}
+                      </div>
+                    </Field>
+                  </PanelSectionRow>
+                );
+              })}
+            </PanelSection>
+          )}
+
           <PanelSection title="Plugin Resources">
             <PanelSectionRow>
-              <Focusable style={{ width: "100%", padding: "10px 0" }}>
                 <Field 
-                  label={<><FaMicrochip /> Plugin CPU Usage{!state.monitoring && " ⚠️"}</>} 
+                  focusable
+                  label={<><FaMicrochip /> Plugin CPU Usage{!state.monitoring && " !"}</>}
                   description={state.monitoring 
                     ? `${totalPluginCpu.toFixed(1)}% of ${systemCpu.toFixed(1)}% total` 
                     : "Snapshot - Enable live monitoring for real-time"
@@ -337,14 +598,13 @@ const Dashboard: FC = () => {
                     {totalPluginCpu.toFixed(1)}%
                   </div>
                 </Field>
-              </Focusable>
             </PanelSectionRow>
             <ProgressBar value={totalPluginCpu} danger={totalPluginCpu > 50} />
 
             <PanelSectionRow>
-              <Focusable style={{ width: "100%", padding: "10px 0" }}>
                 <Field
-                  label={<><FaMemory /> Plugin RAM Usage{!state.monitoring && " ⚠️"}</>}
+                  focusable
+                  label={<><FaMemory /> Plugin RAM Usage{!state.monitoring && " !"}</>}
                   description={state.monitoring 
                     ? `${totalPluginRam} MB used by ${activePlugins.length} plugin${activePlugins.length === 1 ? '' : 's'}` 
                     : "Snapshot - Enable live monitoring for real-time"
@@ -354,64 +614,64 @@ const Dashboard: FC = () => {
                     {totalPluginRam} MB
                   </div>
                 </Field>
-              </Focusable>
             </PanelSectionRow>
             <ProgressBar value={(totalPluginRam / (metrics?.memory.total || 16000)) * 100} color="#2ecc71" />
           </PanelSection>
 
           <PanelSection title="Status">
             <PanelSectionRow>
-              <Focusable style={{ width: "100%", padding: "10px 0" }}>
-                <Field label="System Load" description={`${systemCpu.toFixed(1)}% CPU, ${systemRamPercent}% RAM`}>
+                <Field focusable label="System Load" description={`${systemCpu.toFixed(1)}% CPU, ${systemRamPercent}% RAM`}>
                   <div style={{ fontSize: "16px", opacity: 0.8 }}>
-                    {systemCpu > 85 ? "⚠️ High" : systemCpu > 60 ? "Moderate" : "Normal"}
+                    {systemCpu > 85 ? "High" : systemCpu > 60 ? "Moderate" : "Normal"}
                   </div>
                 </Field>
-              </Focusable>
             </PanelSectionRow>
             <PanelSectionRow>
-              <Focusable style={{ width: "100%", padding: "10px 0" }}>
-                <Field label="Active Plugins" description={`${plugins.length} total installed`}>
+                <Field focusable label="Active Plugins" description={`${plugins.length} total installed`}>
                   <div style={{ fontSize: "20px", fontWeight: "600" }}>{activePlugins.length}</div>
                 </Field>
-              </Focusable>
             </PanelSectionRow>
             <PanelSectionRow>
-              <Focusable style={{ width: "100%", padding: "10px 0" }}>
-                <Field label="Log Errors" description={errorPlugins.length > 0 ? `${errorPlugins.length} plugins affected` : "All clean"}>
+                <Field focusable label="Log Errors" description={errorPlugins.length > 0 ? `${errorPlugins.length} plugins affected` : "All clean"}>
                   <div style={{ fontSize: "20px", fontWeight: "600", color: errorCount > 0 ? "#e74c3c" : "#2ecc71" }}>
                     {errorCount}
                   </div>
                 </Field>
-              </Focusable>
             </PanelSectionRow>
           </PanelSection>
 
           <PanelSection title="Updates">
             <PanelSectionRow>
-              <Focusable style={{ width: "100%", padding: "10px 0" }}>
-                <Field label="Version" description={state.updateStatus?.hasUpdate ? "Update available!" : "Up to date"}>
+                <Field
+                  focusable
+                  label="Version"
+                  description={state.updateStatus?.requiresRestart ? "Restart pending" : state.updateStatus?.hasUpdate ? "Update available!" : "Up to date"}
+                >
                   <div style={{ fontSize: "16px" }}>{state.updateStatus?.current || "Unknown"}</div>
                 </Field>
-              </Focusable>
             </PanelSectionRow>
             {state.updateStatus?.hasUpdate && (
               <PanelSectionRow>
-                <Focusable style={{ width: "100%", padding: "10px 0" }}>
-                  <Field label="Latest Version">
+                  <Field focusable label="Latest Version">
                     <div style={{ fontSize: "16px", color: "#2ecc71" }}>{state.updateStatus.latest}</div>
                   </Field>
-                </Focusable>
+              </PanelSectionRow>
+            )}
+            {state.updateStatus?.elevated === false && (
+              <PanelSectionRow>
+                <Field focusable label="Update Permissions" description="Decky root permissions are required for self-update.">
+                  <div style={{ color: "#ff8a3d", fontWeight: 700 }}>Missing</div>
+                </Field>
               </PanelSectionRow>
             )}
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={state.handleCheckUpdate} disabled={true}>
-                <FaDownload /> Check Update
+              <ButtonItem layout="below" onClick={state.handleCheckUpdate} disabled={state.updating}>
+                <FaDownload /> {state.updating ? "Checking..." : "Check Update"}
               </ButtonItem>
             </PanelSectionRow>
             {state.updateStatus?.canInstall && (
               <PanelSectionRow>
-                <ButtonItem layout="below" onClick={state.handleInstallUpdate} disabled={true}>
+                <ButtonItem layout="below" onClick={state.handleInstallUpdate} disabled={state.updating}>
                   {state.updating ? "Installing..." : state.updateStatus.hasUpdate ? "Install Update" : "Reinstall"}
                 </ButtonItem>
               </PanelSectionRow>
@@ -462,27 +722,43 @@ const Dashboard: FC = () => {
                       }
                     >
                       <div style={{ fontSize: "14px" }}>
-                        <div>CPU: <span style={{ 
+                        <div>CPU: <span style={{
                           color: isCpuSpike ? "#e74c3c" : "#3498db",
                           fontWeight: isCpuSpike ? "bold" : "normal"
-                        }}>{metrics?.cpu?.toFixed(1) || 0}%</span></div>
-                        <div>RAM: <span style={{ 
+                        }}>{metrics?.cpu?.toFixed(1) || 0}%</span> <span style={{ opacity: 0.65 }}>
+                          max {metrics?.peakCpu?.toFixed(1) || 0}%
+                        </span></div>
+                        <div>RAM: <span style={{
                           color: isRamSpike ? "#e74c3c" : "#2ecc71",
                           fontWeight: isRamSpike ? "bold" : "normal"
-                        }}>{metrics?.memory || 0} MB</span></div>
+                        }}>{metrics?.memory || 0} MB</span> <span style={{ opacity: 0.65 }}>
+                          max {metrics?.peakMemory || 0} MB
+                        </span></div>
                       </div>
                     </Field>
-                    <ButtonItem
-                      layout="below"
-                      onClick={() => state.handleTogglePlugin(plugin.name, plugin.disabled)}
-                      disabled={state.busyPlugin === plugin.name}
-                    >
-                      {state.busyPlugin === plugin.name ? (
-                        plugin.disabled ? "Enabling..." : "Disabling..."
-                      ) : (
-                        <><FaBan /> Disable</>
-                      )}
-                    </ButtonItem>
+                    <div style={{ display: "flex", gap: "6px", alignItems: "center", width: "100%" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <ButtonItem
+                          layout="below"
+                          onClick={() => state.handleTogglePlugin(plugin.name, plugin.disabled)}
+                          disabled={state.busyPlugin === plugin.name || state.killingPlugin === plugin.name}
+                        >
+                          {state.busyPlugin === plugin.name ? (
+                            plugin.disabled ? "Enabling..." : "Disabling..."
+                          ) : (
+                            <><FaBan /> Disable</>
+                          )}
+                        </ButtonItem>
+                      </div>
+                      <SquareIconButton
+                        label={`Kill ${plugin.name}`}
+                        danger
+                        onClick={() => state.handleKillPlugin(plugin.name)}
+                        disabled={state.killingPlugin === plugin.name || state.busyPlugin === plugin.name}
+                      >
+                        <FaTimes />
+                      </SquareIconButton>
+                    </div>
                   </PanelSectionRow>
                 );
               })
@@ -544,12 +820,50 @@ const Dashboard: FC = () => {
             errorPlugins.map((plugin) => (
               <PanelSection key={plugin.name} title={plugin.name}>
                 <PanelSectionRow>
-                  <Field label="Errors Found" description="Error count in logs">
+                  <Field
+                    focusable
+                    label="Errors Found"
+                    description={plugin.logs?.severity ? `Severity: ${plugin.logs.severity}` : "Error count in logs"}
+                  >
                     <div style={{ fontSize: "20px", fontWeight: "600", color: "#e74c3c" }}>
                       {plugin.logs?.errors || 0}
                     </div>
                   </Field>
                 </PanelSectionRow>
+
+                {(plugin.logs?.alerts || []).map((alert) => (
+                  <PanelSectionRow key={alert.id}>
+                    <Field focusable label={alert.title} description={alert.message}>
+                      <div style={{ color: severityColor(alert.severity), fontWeight: 700, textTransform: "capitalize" }}>
+                        {alert.severity}
+                      </div>
+                    </Field>
+                  </PanelSectionRow>
+                ))}
+
+                {(plugin.logs?.knownIssues || []).slice(0, 3).map((issue) => (
+                  <PanelSectionRow key={issue.id}>
+                    <Field focusable label={issue.title} description={`${issue.advice} (${issue.count} matches)`}>
+                      <div style={{ color: severityColor(issue.severity), fontWeight: 700, textTransform: "capitalize" }}>
+                        {issue.severity}
+                      </div>
+                    </Field>
+                  </PanelSectionRow>
+                ))}
+
+                {plugin.logs?.rate?.active && (
+                  <PanelSectionRow>
+                    <Field
+                      focusable
+                      label="Log Write Rate"
+                      description={`${plugin.logs.rate.linesPerSecond.toFixed(1)} lines/sec, ${plugin.logs.rate.errorsPerSecond.toFixed(2)} errors/sec`}
+                    >
+                      <div style={{ color: "#f1c40f", fontWeight: 700 }}>
+                        {(plugin.logs.rate.bytesPerSecond / 1024).toFixed(1)} KB/s
+                      </div>
+                    </Field>
+                  </PanelSectionRow>
+                )}
 
                 {plugin.logs?.examples.slice(0, 2).map((example, i) => (
                   <Focusable key={i} style={{ padding: "12px 16px" }}>

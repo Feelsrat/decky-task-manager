@@ -6,7 +6,10 @@
  * Single command to build, package, and release to GitHub using GitHub CLI.
  * Requires: gh CLI installed and authenticated (gh auth login)
  * 
- * Usage: pnpm run release
+ * Usage:
+ *   pnpm run release
+ *   pnpm run release -- --private
+ *   pnpm run release -- --draft
  */
 
 import { readFileSync, existsSync, rmSync, writeFileSync } from 'fs';
@@ -19,6 +22,35 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
 
 const ZIP_FILENAME = 'decky-task-manager.zip';
+
+function printUsage() {
+  console.log(`Usage:
+  pnpm run release              Create a public GitHub release
+  pnpm run release -- --private Create a draft release for private review
+  pnpm run release -- --draft   Alias for --private
+`);
+}
+
+function parseArgs(argv) {
+  const options = {
+    draft: false,
+  };
+
+  for (const arg of argv) {
+    if (arg === '--private' || arg === '--draft') {
+      options.draft = true;
+    } else if (arg === '--help' || arg === '-h') {
+      printUsage();
+      process.exit(0);
+    } else {
+      console.error(`Unknown release option: ${arg}`);
+      printUsage();
+      process.exit(1);
+    }
+  }
+
+  return options;
+}
 
 function bumpVersion() {
   console.log('📝 Bumping version...');
@@ -107,7 +139,7 @@ function checkGitHubCLI() {
   }
 }
 
-function publishToGitHub(zipPath) {
+function publishToGitHub(zipPath, options) {
   // Check if gh CLI is installed
   if (!checkGitHubCLI()) {
     console.error('❌ Error: GitHub CLI (gh) is not installed');
@@ -122,6 +154,9 @@ function publishToGitHub(zipPath) {
   const tagName = `v${version}`;
 
   console.log(`\n🚀 Publishing ${tagName} to GitHub...`);
+  if (options.draft) {
+    console.log('Creating a draft release. It will stay private until you publish it in GitHub.');
+  }
 
   try {
     // Check if user is authenticated
@@ -145,6 +180,10 @@ function publishToGitHub(zipPath) {
       `Release ${tagName}`
     ];
 
+    if (options.draft) {
+      releaseArgs.push('--draft');
+    }
+
     // Add prerelease flag if needed
     if (version.includes('test') || version.includes('alpha') || version.includes('beta')) {
       releaseArgs.push('--prerelease');
@@ -160,8 +199,21 @@ function publishToGitHub(zipPath) {
       throw new Error(`gh command failed with exit code ${result.status}`);
     }
 
-    console.log('\n✅ Release complete!');
-    console.log(`   View at: https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/${tagName}`);
+    let repo = '';
+    try {
+      repo = execSync('gh repo view --json nameWithOwner -q .nameWithOwner', {
+        cwd: rootDir,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {
+      repo = '';
+    }
+
+    console.log(options.draft ? '\n✅ Draft release created!' : '\n✅ Release complete!');
+    if (repo) {
+      console.log(`   View at: https://github.com/${repo}/releases/tag/${tagName}`);
+    }
 
   } catch (error) {
     console.error('❌ Error publishing to GitHub:', error.message);
@@ -170,6 +222,10 @@ function publishToGitHub(zipPath) {
 }
 
 async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.draft) {
+    console.log('Draft/private review mode is enabled.');
+  }
   console.log('🎯 Starting release process...\n');
   
   // Bump version first
@@ -188,11 +244,10 @@ async function main() {
   cleanup();
   build();
   const zipPath = createPackage();
-  publishToGitHub(zipPath);
+  publishToGitHub(zipPath, options);
   
   console.log('\n🎉 Done!');
   console.log(`Released version ${newVersion}`);
 }
 
 main();
- 
