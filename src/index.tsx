@@ -179,6 +179,19 @@ function useTaskManager() {
   useEffect(() => {
     setLoading(true);
     refresh().finally(() => setLoading(false));
+    
+    // Auto-check for updates on startup (uses 24-hour cache)
+    checkUpdate().then((result) => {
+      setUpdateStatus(result);
+      if (result.hasUpdate) {
+        toaster.toast({ 
+          title: "Update Available", 
+          body: `Version ${result.latest} is available` 
+        });
+      }
+    }).catch(() => {
+      // Silently ignore update check failures
+    });
   }, []);
 
   useEffect(() => {

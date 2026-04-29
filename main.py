@@ -27,6 +27,7 @@ SYSTEM_CPU_SPIKE = 85.0
 PLUGIN_CPU_SPIKE = 20.0
 PLUGIN_MEMORY_SPIKE_MB = 250
 GITHUB_RELEASES_URL = "https://api.github.com/repos/Feelsrat/decky-task-manager/releases"
+AUTO_CHECK_INTERVAL = 86400  # 24 hours in seconds
 
 
 class Plugin:
@@ -35,9 +36,13 @@ class Plugin:
         self._previous_processes: dict[int, int] = {}
         self._history: list[dict[str, Any]] = []
         self._last_update_error = ""
+        self._cached_update_status: dict[str, Any] | None = None
+        self._last_check_time = 0.0
 
     async def _main(self):
         decky.logger.info("Decky Task Manager loaded")
+        # Auto-check for updates on startup (once per 24 hours)
+        asyncio.create_task(self._auto_check_update())
 
     async def _unload(self):
         decky.logger.info("Decky Task Manager unloaded")
@@ -230,33 +235,45 @@ class Plugin:
         }
 
     async def check_update(self) -> dict[str, Any]:
+        # Return cached result if checked within last 24 hours
+        if self._cached_update_status and (time.time() - self._last_check_time) < AUTO_CHECK_INTERVAL:
+            decky.logger.info("Returning cached update status (checked recently)")
+            return self._cached_update_status
+
         current = self._current_version()
         release = self._latest_release()
         if release is None:
             detail = f" {self._last_update_error}" if self._last_update_error else ""
-            return {
+            result = {
                 "ok": False,
                 "current": current,
                 "hasUpdate": False,
                 "canInstall": False,
                 "message": f"Could not read GitHub releases.{detail}",
             }
+        else:
+            latest = str(release.get("tag_name", "")).removeprefix("v")
+            asset = self._release_asset(release)
+            has_update = bool(latest and latest != current and asset)
+            can_install = bool(asset)
 
-        latest = str(release.get("tag_name", "")).removeprefix("v")
-        asset = self._release_asset(release)
-        has_update = bool(latest and latest != current and asset)
-        can_install = bool(asset)
+            result = {
+                "ok": True,
+                "current": current,
+                "latest": latest,
+                "hasUpdate": has_update,
+                "canInstall": can_install,
+                "assetName": asset.get("name") if asset else "",
+                "releaseUrl": release.get("html_url", ""),
+                "message": "Update available." if has_update else "Latest release is already installed.",
+            }
 
-        return {
-            "ok": True,
-            "current": current,
-            "latest": latest,
-            "hasUpdate": has_update,
-            "canInstall": can_install,
-            "assetName": asset.get("name") if asset else "",
-            "releaseUrl": release.get("html_url", ""),
-            "message": "Update available." if has_update else "Latest release is already installed.",
-        }
+        # Cache the result
+        self._cached_update_status = result
+        self._last_check_time = time.time()
+        self._update_last_check_time()
+        
+        return result
 
     async def install_update(self) -> dict[str, Any]:
         status = await self.check_update()
@@ -310,6 +327,9 @@ class Plugin:
                 "message": f"Update failed: {error}. Check ~/homebrew/logs/decky-task-manager/ for details.",
             }
 
+        # Kill any old plugin processes before restarting
+        self._kill_old_processes()
+        
         restarted = self._schedule_loader_restart()
         return {
             **status,
@@ -320,6 +340,48 @@ class Plugin:
                 else "Update installed! Please restart Steam to apply changes."
             ),
         }
+
+    async def _auto_check_update(self) -> None:
+        """
+        Automatically check for updates on plugin load.
+        Respects 24-hour cache from check_update().
+        """
+        try:
+            decky.logger.info("Running automatic update check on startup")
+            status = await self.check_update()
+            
+            if status.get("hasUpdate"):
+                decky.logger.info(
+                    "Update available: %s → %s",
+                    status.get("current", "unknown"),
+                    status.get("latest", "unknown"),
+                )
+            else:
+                decky.logger.info("Plugin is up to date")
+        except Exception as error:
+            decky.logger.warning("Auto-update check failed: %s", error)
+
+    def _should_auto_check(self) -> bool:
+        """Check if 24 hours have passed since last update check."""
+        check_file = Path(decky.DECKY_PLUGIN_DIR) / ".last_update_check"
+        
+        if not check_file.exists():
+            return True
+        
+        try:
+            last_check = float(check_file.read_text(encoding="utf-8").strip())
+            elapsed = time.time() - last_check
+            return elapsed >= AUTO_CHECK_INTERVAL
+        except (OSError, ValueError):
+            return True
+
+    def _update_last_check_time(self) -> None:
+        """Update the timestamp of the last update check."""
+        check_file = Path(decky.DECKY_PLUGIN_DIR) / ".last_update_check"
+        try:
+            check_file.write_text(str(time.time()), encoding="utf-8")
+        except OSError as error:
+            decky.logger.warning("Failed to update last check time: %s", error)
 
     def _merge_plugin_data(
         self,
@@ -910,3 +972,43 @@ class Plugin:
         
         decky.logger.error("All restart methods failed - manual restart required")
         return False
+
+    def _kill_old_processes(self) -> None:
+        """
+        Kill any old decky-task-manager Python processes before restarting.
+        This prevents zombie processes from staying alive after updates.
+        """
+        try:
+            current_pid = os.getpid()
+            plugin_dir = str(Path(decky.DECKY_PLUGIN_DIR).resolve())
+            
+            decky.logger.info(f"Searching for old processes (current PID: {current_pid})")
+            
+            # Find all Python processes running from this plugin directory
+            result = subprocess.run(
+                ["pgrep", "-f", plugin_dir],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            
+            if result.returncode == 0:
+                pids = [int(pid) for pid in result.stdout.strip().split("\n") if pid]
+                decky.logger.info(f"Found {len(pids)} process(es) for this plugin: {pids}")
+                
+                for pid in pids:
+                    if pid == current_pid:
+                        decky.logger.info(f"Skipping current process (PID: {pid})")
+                        continue
+                    
+                    try:
+                        decky.logger.info(f"Killing old process PID: {pid}")
+                        subprocess.run(["kill", "-9", str(pid)], timeout=2, check=False)
+                        decky.logger.info(f"✓ Killed PID: {pid}")
+                    except Exception as error:
+                        decky.logger.warning(f"Failed to kill PID {pid}: {error}")
+            else:
+                decky.logger.info("No additional plugin processes found")
+                
+        except Exception as error:
+            decky.logger.warning(f"Failed to kill old processes: {error}")
