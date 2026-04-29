@@ -30,3 +30,8 @@ Install dependencies and build the plugin with pnpm. Use `pnpm install` to get s
 
 To create a new release, make sure you have the GitHub CLI installed and authenticated with `gh auth login`. Then run `pnpm run release` which will bump the version, run tests, build everything, package it into a ZIP, and push a new release to GitHub.
 
+## TODO (If I feel like maintaining this)
+
+Create a list of known errors for common plugins and alert the user if errors are serious
+alert user if logs are being hit constantly by a plugin every x secs and stuff like that
+
