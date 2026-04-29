@@ -5,6 +5,7 @@ A lightweight Decky Loader plugin for monitoring your other plugins without leav
 The plugin has three tabs. The Overview tab shows system CPU and RAM usage, along with which plugins are currently running and how much resources they're using. The Plugins tab lets you enable or disable any plugin with a single tap. The Logs tab scans error messages from plugin logs and groups similar ones together so you can see which plugins are having issues.
 
 ***below doesnt work rn, status gets flipped when navigating out***
+
 Live monitoring can be toggled on to watch CPU and RAM metrics in real time. When it's off, you get a snapshot of the last values. The plugin does micro-sampling every second when live monitoring is enabled, taking four quick samples to catch brief CPU spikes that might otherwise be missed. Testing mode clears all logs, resets metric peaks, and starts fresh monitoring so you can reproduce a problem cleanly. !!! DO NOT LEAVE THIS ON !!! (probably idk, havent tested it that much yet)
 
 Updates can be checked and installed directly from the plugin once a new release is available on GitHub.
