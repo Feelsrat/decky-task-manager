@@ -405,13 +405,13 @@ const Dashboard: FC = () => {
               </PanelSectionRow>
             )}
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={state.handleCheckUpdate} disabled={state.updating}>
+              <ButtonItem layout="below" onClick={state.handleCheckUpdate} disabled={true}>
                 <FaDownload /> Check Update
               </ButtonItem>
             </PanelSectionRow>
             {state.updateStatus?.canInstall && (
               <PanelSectionRow>
-                <ButtonItem layout="below" onClick={state.handleInstallUpdate} disabled={state.updating}>
+                <ButtonItem layout="below" onClick={state.handleInstallUpdate} disabled={true}>
                   {state.updating ? "Installing..." : state.updateStatus.hasUpdate ? "Install Update" : "Reinstall"}
                 </ButtonItem>
               </PanelSectionRow>
