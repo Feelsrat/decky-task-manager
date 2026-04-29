@@ -37,5 +37,6 @@ To create a new release, make sure you have the GitHub CLI installed and authent
 - fix the auto updater, disabled for now but was creating zombie processes and not clearing previous instances on decky refresh
 - fix the ui so that its fully usable with the controls, currently you have to use touch screen as a big chunk of the middle area in the overview tab is not focusable (it is in the code but theres probably a support issue there or something).
 - Id like a fullscreen ui potentially and also just to investigate if I can override some of the default decky styles and components and make stuff look and behave a bit nicer and more usable from a ui/ux perspective.
+- ***live monitor doesnt really work at the moment***
   
 
