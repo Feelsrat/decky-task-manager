@@ -894,6 +894,7 @@ const Dashboard: FC = () => {
           )}
         </>
       )}
+      <small>By Yuri</small>
     </>
   );
 };
