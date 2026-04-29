@@ -37,6 +37,9 @@ Thumbs.db
 # Ignore built ts files
 dist/
 
+# Ignore release artifacts
+*.zip
+
 __pycache__/
 
 /.yalc
@@ -53,3 +56,6 @@ out/*
 cli/
 cli/*
 cli/decky
+
+# Ignore project index skill file (local development reference)
+SKILL.md
