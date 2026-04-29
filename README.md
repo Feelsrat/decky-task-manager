@@ -10,7 +10,7 @@ Updates can be checked and installed directly from the plugin once a new release
 
 ## Why
 
-Decky plugins are great, but when one starts acting up it can be hard to figure out which one is causing problems. This plugin gives you a quick first look at what's going on: which plugins are throwing errors, how loaded your Deck is, and which plugins you might want to disable before investigating further.
+Decky plugins are great, but when one starts acting up it can be hard to figure out which one is causing problems. This plugin gives you a quick first look at what's going on: which plugins are throwing errors, how loaded your Deck is, and which plugins you might want to disable before investigating further. Personally I was having an issue with Muradeck on my steam deck oled (Bazzite) which was causing fps issues when I would have any ui rendered ontop of a game e.g. fps counter or tweaking volume.
 
 ## Notes
 
