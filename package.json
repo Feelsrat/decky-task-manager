@@ -1,6 +1,6 @@
 {
   "name": "decky-task-manager",
-  "version": "0.0.1-test.12",
+  "version": "0.0.1-test.13",
   "description": "A lightweight Decky panel for plugin log errors, system metrics, and disabling plugins.",
   "type": "module",
   "scripts": {
