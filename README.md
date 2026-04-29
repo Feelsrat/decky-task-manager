@@ -28,7 +28,22 @@ Decky plugins are brilliant, but when one starts misbehaving it can be annoying 
 pnpm install    # Install dependencies
 pnpm run build  # Build the plugin
 pnpm run watch  # Watch mode for development
+pnpm run test   # Run validation tests
 ```
+
+### Testing
+
+Before releasing, validate your plugin:
+
+```bash
+pnpm run test
+```
+
+This checks:
+- Python syntax errors
+- TypeScript build succeeds  
+- Required files exist
+- Plugin manifest is valid
 
 ### Release
 
@@ -37,13 +52,14 @@ pnpm run watch  # Watch mode for development
 winget install GitHub.cli
 gh auth login
 
-# Build, package, and release to GitHub in one command
+# Build, test, package, and release to GitHub in one command
 pnpm run release
 ```
 
-This will:
-1. Clean old build artifacts
-2. Build the plugin
-3. Create a zip package
-4. Create a GitHub release with the zip attached
+The release command automatically:
+1. Runs validation tests
+2. Cleans old build artifacts
+3. Builds the plugin
+4. Creates a zip package
+5. Creates a GitHub release with the zip attached
 

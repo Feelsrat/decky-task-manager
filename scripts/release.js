@@ -9,10 +9,10 @@
  * Usage: pnpm run release
  */
 
-import { readFileSync, existsSync, rmSync } from 'fs';
+import { readFileSync, existsSync, rmSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import AdmZip from 'adm-zip';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,6 +20,39 @@ const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
 
 const ZIP_FILENAME = 'decky-task-manager.zip';
+
+function bumpVersion() {
+  console.log('📝 Bumping version...');
+  
+  const packageJsonPath = join(rootDir, 'package.json');
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+  const currentVersion = packageJson.version;
+  
+  // Parse version (supports semver and test versions like 0.0.1-test.9)
+  const versionMatch = currentVersion.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+)\.(\d+))?$/);
+  
+  if (!versionMatch) {
+    console.error(`❌ Invalid version format: ${currentVersion}`);
+    process.exit(1);
+  }
+  
+  let [, major, minor, patch, preRelease, preReleaseNum] = versionMatch;
+  
+  // If it's a pre-release (test, alpha, beta), increment the pre-release number
+  if (preRelease && preReleaseNum) {
+    preReleaseNum = parseInt(preReleaseNum) + 1;
+    packageJson.version = `${major}.${minor}.${patch}-${preRelease}.${preReleaseNum}`;
+  } else {
+    // Otherwise, increment patch version
+    patch = parseInt(patch) + 1;
+    packageJson.version = `${major}.${minor}.${patch}`;
+  }
+  
+  writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n', 'utf-8');
+  
+  console.log(`✓ Version bumped: ${currentVersion} → ${packageJson.version}`);
+  return packageJson.version;
+}
 
 function cleanup() {
   console.log('🧹 Cleaning build artifacts...');
@@ -52,7 +85,7 @@ function createPackage() {
   const zip = new AdmZip();
   
   // Add required files
-  const files = ['plugin.json', 'main.py', 'package.json', 'README.md'];
+  const files = ['plugin.json', 'main.py', 'defaults.py', 'package.json', 'README.md'];
   for (const file of files) {
     const filePath = join(rootDir, file);
     if (existsSync(filePath)) {
@@ -112,14 +145,16 @@ function publishToGitHub(zipPath) {
       process.exit(1);
     }
 
-    // Build the release command
+    // Build the release command arguments
     const releaseArgs = [
       'release',
       'create',
       tagName,
       zipPath,
-      '--title', `Decky Task Manager ${tagName}`,
-      '--notes', `Release ${tagName}`
+      '--title',
+      `Decky Task Manager ${tagName}`,
+      '--notes',
+      `Release ${tagName}`
     ];
 
     // Add prerelease flag if needed
@@ -128,10 +163,14 @@ function publishToGitHub(zipPath) {
     }
 
     console.log('Creating GitHub release...');
-    execSync(`gh ${releaseArgs.join(' ')}`, {
+    const result = spawnSync('gh', releaseArgs, {
       cwd: rootDir,
       stdio: 'inherit'
     });
+
+    if (result.status !== 0) {
+      throw new Error(`gh command failed with exit code ${result.status}`);
+    }
 
     console.log('\n✅ Release complete!');
     console.log(`   View at: https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/${tagName}`);
@@ -145,19 +184,27 @@ function publishToGitHub(zipPath) {
 async function main() {
   console.log('🎯 Starting release process...\n');
   
+  // Bump version first
+  const newVersion = bumpVersion();
+  console.log('');
+  
+  // Run tests
+  console.log('Running validation tests...');
+  try {
+    execSync('pnpm run test', { cwd: rootDir, stdio: 'inherit' });
+  } catch (error) {
+    console.error('\n❌ Tests failed! Fix errors before releasing.');
+    process.exit(1);
+  }
+  
   cleanup();
   build();
   const zipPath = createPackage();
-  await publishToGitHub(zipPath);
+  publishToGitHub(zipPath);
   
   console.log('\n🎉 Done!');
+  console.log(`Released version ${newVersion}`);
 }
 
 main();
-function main() {
-  console.log('🎯 Starting release process...\n');
-  
-  cleanup();
-  build();
-  const zipPath = createPackage();
  

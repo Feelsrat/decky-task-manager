@@ -775,13 +775,7 @@ class Plugin:
             check=False,
             capture_output=True,
             text=True,
-            timeout=60
-        result = subprocess.run(
-            ["curl", "-fL", "-A", "decky-task-manager", "-o", str(target), request.full_url],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=45,
+            timeout=60,
         )
         if result.returncode != 0:
             raise urllib.error.URLError(result.stderr.strip() or f"curl exited {result.returncode}")
