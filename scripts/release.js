@@ -13,7 +13,6 @@ import { readFileSync, existsSync, rmSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, spawnSync } from 'child_process';
-import AdmZip from 'adm-zip';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -82,30 +81,19 @@ function createPackage() {
   console.log('📦 Creating release package...');
   
   const zipPath = join(rootDir, ZIP_FILENAME);
-  const zip = new AdmZip();
   
-  // Add required files
-  const files = ['plugin.json', 'main.py', 'defaults.py', 'package.json', 'README.md'];
-  for (const file of files) {
-    const filePath = join(rootDir, file);
-    if (existsSync(filePath)) {
-      zip.addLocalFile(filePath);
-    } else {
-      console.warn(`⚠ Warning: ${file} not found`);
-    }
-  }
+  // Use Python to create cross-platform ZIP with forward slashes
+  const pythonScript = join(rootDir, 'scripts', 'create_zip.py');
   
-  // Add dist folder
-  const distPath = join(rootDir, 'dist');
-  if (existsSync(distPath)) {
-    zip.addLocalFolder(distPath, 'dist');
-  } else {
-    console.error('❌ Error: dist folder not found');
+  try {
+    execSync(`python "${pythonScript}"`, { 
+      cwd: rootDir,
+      stdio: 'inherit'
+    });
+  } catch (error) {
+    console.error('❌ Error creating ZIP:', error.message);
     process.exit(1);
   }
-  
-  zip.writeZip(zipPath);
-  console.log(`✓ Created ${ZIP_FILENAME}`);
   
   return zipPath;
 }
