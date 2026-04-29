@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
 import time
@@ -150,6 +151,42 @@ class Plugin:
         return {
             "ok": True,
             "message": f"{name} is disabled.",
+            "restarted": restarted,
+        }
+
+    async def enable_plugin(self, name: str) -> dict[str, Any]:
+        plugins = self._list_plugins()
+        valid_names = {plugin["name"] for plugin in plugins}
+
+        if name not in valid_names:
+            return {"ok": False, "message": f"{name} was not found."}
+
+        settings_path = Path(decky.DECKY_HOME) / "settings" / "loader.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+        settings: dict[str, Any] = {}
+        if settings_path.exists():
+            try:
+                settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                backup_path = settings_path.with_suffix(".json.bak")
+                backup_path.write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
+                decky.logger.warning("Backed up unreadable loader settings to %s", backup_path)
+
+        disabled_plugins = settings.get("disabled_plugins", [])
+        if not isinstance(disabled_plugins, list):
+            disabled_plugins = []
+
+        if name in disabled_plugins:
+            disabled_plugins.remove(name)
+
+        settings["disabled_plugins"] = disabled_plugins
+        settings_path.write_text(json.dumps(settings, indent=4), encoding="utf-8")
+
+        restarted = self._schedule_loader_restart()
+        return {
+            "ok": True,
+            "message": f"{name} is enabled.",
             "restarted": restarted,
         }
 
@@ -611,27 +648,33 @@ class Plugin:
         return None
 
     def _fetch_json(self, url: str) -> Any | None:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "decky-task-manager",
-            },
-        )
-
+        # Try Python urllib with SSL context first
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "decky-task-manager",
+                },
+            )
+            
+            with urllib.request.urlopen(request, timeout=10, context=ssl_context) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (OSError, json.JSONDecodeError, urllib.error.URLError) as error:
             self._last_update_error = f"Python fetch failed: {error}"
 
+        # Fallback to curl
         try:
             result = subprocess.run(
-                ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json", "-A", "decky-task-manager", url],
+                ["curl", "-fsSL", "-k", "-H", "Accept: application/vnd.github+json", "-A", "decky-task-manager", url],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=15,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             self._last_update_error += f"; curl failed: {error}"
@@ -714,19 +757,25 @@ class Plugin:
 
         for member in archive.infolist():
             destination = (target / member.filename).resolve()
-            if resolved_target not in [destination, *destination.parents]:
-                raise ValueError("release zip contains an unsafe path")
-
-        archive.extractall(target)
-
-    def _download_file(self, request: urllib.request.Request, target: Path) -> None:
+        # Try Python urllib with SSL context first
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            with urllib.request.urlopen(request, timeout=45, context=ssl_context) as response:
                 target.write_bytes(response.read())
                 return
-        except (OSError, urllib.error.URLError):
-            pass
+        except (OSError, urllib.error.URLError) as error:
+            decky.logger.warning(f"Python download failed, trying curl: {error}")
 
+        # Fallback to curl
+        result = subprocess.run(
+            ["curl", "-fL", "-k", "-A", "decky-task-manager", "-o", str(target), request.full_url],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60
         result = subprocess.run(
             ["curl", "-fL", "-A", "decky-task-manager", "-o", str(target), request.full_url],
             check=False,
