@@ -904,12 +904,6 @@ class Plugin:
             
             decky.logger.info(f"Found plugin at: {extracted_plugin}")
 
-            # Kill all old processes BEFORE cleanup (including processes from backup dirs)
-            self._kill_old_processes()
-
-            # Clean up all old backup directories before creating new one
-            self._cleanup_old_backups(plugin_dir)
-
             backup_dir = plugin_dir.with_name(f"{plugin_dir.name}.previous")
             if backup_dir.exists():
                 decky.logger.info(f"Removing old backup: {backup_dir}")
@@ -1023,75 +1017,3 @@ class Plugin:
         
         decky.logger.error("All restart methods failed - manual restart required")
         return False
-
-    def _cleanup_old_backups(self, plugin_dir: Path) -> None:
-        """
-        Remove all old backup directories (*.previous*) before creating a new backup.
-        This prevents accumulation of multiple backup directories.
-        """
-        try:
-            plugins_dir = plugin_dir.parent
-            plugin_name = plugin_dir.name
-            
-            # Find all backup directories
-            backup_pattern = f"{plugin_name}.previous*"
-            backups = list(plugins_dir.glob(backup_pattern))
-            
-            if backups:
-                decky.logger.info(f"Found {len(backups)} old backup(s) to remove")
-                for backup in backups:
-                    try:
-                        decky.logger.info(f"Removing old backup: {backup.name}")
-                        shutil.rmtree(backup)
-                    except Exception as error:
-                        decky.logger.warning(f"Failed to remove {backup.name}: {error}")
-            else:
-                decky.logger.info("No old backups found")
-                
-        except Exception as error:
-            decky.logger.warning(f"Failed to cleanup old backups: {error}")
-
-    def _kill_old_processes(self) -> None:
-        """
-        Kill any old decky-task-manager Python processes before restarting.
-        This prevents zombie processes from staying alive after updates.
-        Searches for processes from main directory AND backup directories.
-        """
-        try:
-            current_pid = os.getpid()
-            
-            decky.logger.info(f"Searching for old processes (current PID: {current_pid})")
-            
-            # Find all Python processes running decky-task-manager (from any directory)
-            result = subprocess.run(
-                ["pgrep", "-f", "decky-task-manager/main.py"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            
-            if result.returncode == 0:
-                pids = [int(pid) for pid in result.stdout.strip().split("\n") if pid]
-                decky.logger.info(f"Found {len(pids)} decky-task-manager process(es): {pids}")
-                
-                killed = 0
-                for pid in pids:
-                    if pid == current_pid:
-                        decky.logger.info(f"Skipping current process (PID: {pid})")
-                        continue
-                    
-                    try:
-                        decky.logger.info(f"Killing old process PID: {pid}")
-                        subprocess.run(["kill", "-9", str(pid)], timeout=2, check=False)
-                        killed += 1
-                        decky.logger.info(f"✓ Killed PID: {pid}")
-                    except Exception as error:
-                        decky.logger.warning(f"Failed to kill PID {pid}: {error}")
-                
-                if killed > 0:
-                    decky.logger.info(f"✓ Successfully killed {killed} old process(es)")
-            else:
-                decky.logger.info("No additional plugin processes found")
-                
-        except Exception as error:
-            decky.logger.warning(f"Failed to kill old processes: {error}")

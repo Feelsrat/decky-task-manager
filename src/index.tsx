@@ -325,69 +325,83 @@ const Dashboard: FC = () => {
 
           <PanelSection title="Plugin Resources">
             <PanelSectionRow>
-              <Field 
-                label={<><FaMicrochip /> Plugin CPU Usage{!state.monitoring && " ⚠️"}</>} 
-                description={state.monitoring 
-                  ? `${totalPluginCpu.toFixed(1)}% of ${systemCpu.toFixed(1)}% total` 
-                  : "Snapshot - Enable live monitoring for real-time"
-                }
-              >
-                <div style={{ fontSize: "24px", fontWeight: "bold", color: totalPluginCpu > 50 ? "#e74c3c" : "#3498db" }}>
-                  {totalPluginCpu.toFixed(1)}%
-                </div>
-              </Field>
+              <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                <Field 
+                  label={<><FaMicrochip /> Plugin CPU Usage{!state.monitoring && " ⚠️"}</>} 
+                  description={state.monitoring 
+                    ? `${totalPluginCpu.toFixed(1)}% of ${systemCpu.toFixed(1)}% total` 
+                    : "Snapshot - Enable live monitoring for real-time"
+                  }
+                >
+                  <div style={{ fontSize: "24px", fontWeight: "bold", color: totalPluginCpu > 50 ? "#e74c3c" : "#3498db" }}>
+                    {totalPluginCpu.toFixed(1)}%
+                  </div>
+                </Field>
+              </Focusable>
             </PanelSectionRow>
             <ProgressBar value={totalPluginCpu} danger={totalPluginCpu > 50} />
 
             <PanelSectionRow>
-              <Field
-                label={<><FaMemory /> Plugin RAM Usage{!state.monitoring && " ⚠️"}</>}
-                description={state.monitoring 
-                  ? `${totalPluginRam} MB used by ${activePlugins.length} plugin${activePlugins.length === 1 ? '' : 's'}` 
-                  : "Snapshot - Enable live monitoring for real-time"
-                }
-              >
-                <div style={{ fontSize: "24px", fontWeight: "bold", color: "#2ecc71" }}>
-                  {totalPluginRam} MB
-                </div>
-              </Field>
+              <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                <Field
+                  label={<><FaMemory /> Plugin RAM Usage{!state.monitoring && " ⚠️"}</>}
+                  description={state.monitoring 
+                    ? `${totalPluginRam} MB used by ${activePlugins.length} plugin${activePlugins.length === 1 ? '' : 's'}` 
+                    : "Snapshot - Enable live monitoring for real-time"
+                  }
+                >
+                  <div style={{ fontSize: "24px", fontWeight: "bold", color: "#2ecc71" }}>
+                    {totalPluginRam} MB
+                  </div>
+                </Field>
+              </Focusable>
             </PanelSectionRow>
             <ProgressBar value={(totalPluginRam / (metrics?.memory.total || 16000)) * 100} color="#2ecc71" />
           </PanelSection>
 
           <PanelSection title="Status">
             <PanelSectionRow>
-              <Field label="System Load" description={`${systemCpu.toFixed(1)}% CPU, ${systemRamPercent}% RAM`}>
-                <div style={{ fontSize: "16px", opacity: 0.8 }}>
-                  {systemCpu > 85 ? "⚠️ High" : systemCpu > 60 ? "Moderate" : "Normal"}
-                </div>
-              </Field>
+              <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                <Field label="System Load" description={`${systemCpu.toFixed(1)}% CPU, ${systemRamPercent}% RAM`}>
+                  <div style={{ fontSize: "16px", opacity: 0.8 }}>
+                    {systemCpu > 85 ? "⚠️ High" : systemCpu > 60 ? "Moderate" : "Normal"}
+                  </div>
+                </Field>
+              </Focusable>
             </PanelSectionRow>
             <PanelSectionRow>
-              <Field label="Active Plugins" description={`${plugins.length} total installed`}>
-                <div style={{ fontSize: "20px", fontWeight: "600" }}>{activePlugins.length}</div>
-              </Field>
+              <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                <Field label="Active Plugins" description={`${plugins.length} total installed`}>
+                  <div style={{ fontSize: "20px", fontWeight: "600" }}>{activePlugins.length}</div>
+                </Field>
+              </Focusable>
             </PanelSectionRow>
             <PanelSectionRow>
-              <Field label="Log Errors" description={errorPlugins.length > 0 ? `${errorPlugins.length} plugins affected` : "All clean"}>
-                <div style={{ fontSize: "20px", fontWeight: "600", color: errorCount > 0 ? "#e74c3c" : "#2ecc71" }}>
-                  {errorCount}
-                </div>
-              </Field>
+              <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                <Field label="Log Errors" description={errorPlugins.length > 0 ? `${errorPlugins.length} plugins affected` : "All clean"}>
+                  <div style={{ fontSize: "20px", fontWeight: "600", color: errorCount > 0 ? "#e74c3c" : "#2ecc71" }}>
+                    {errorCount}
+                  </div>
+                </Field>
+              </Focusable>
             </PanelSectionRow>
           </PanelSection>
 
           <PanelSection title="Updates">
             <PanelSectionRow>
-              <Field label="Version" description={state.updateStatus?.hasUpdate ? "Update available!" : "Up to date"}>
-                <div style={{ fontSize: "16px" }}>{state.updateStatus?.current || "Unknown"}</div>
-              </Field>
+              <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                <Field label="Version" description={state.updateStatus?.hasUpdate ? "Update available!" : "Up to date"}>
+                  <div style={{ fontSize: "16px" }}>{state.updateStatus?.current || "Unknown"}</div>
+                </Field>
+              </Focusable>
             </PanelSectionRow>
             {state.updateStatus?.hasUpdate && (
               <PanelSectionRow>
-                <Field label="Latest Version">
-                  <div style={{ fontSize: "16px", color: "#2ecc71" }}>{state.updateStatus.latest}</div>
-                </Field>
+                <Focusable style={{ width: "100%", padding: "10px 0" }}>
+                  <Field label="Latest Version">
+                    <div style={{ fontSize: "16px", color: "#2ecc71" }}>{state.updateStatus.latest}</div>
+                  </Field>
+                </Focusable>
               </PanelSectionRow>
             )}
             <PanelSectionRow>
