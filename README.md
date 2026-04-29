@@ -32,9 +32,10 @@ To create a new release, make sure you have the GitHub CLI installed and authent
 
 ## TODO (If I feel like maintaining this)
 
-- Create a list of known errors for common plugins and alert the user if errors are serious
+- Create a list of known errors for common plugins and alert the user if errors are serious/rank issues etc
 - alert user if logs are being hit constantly by a plugin every x secs and stuff like that
 - fix the auto updater, disabled for now but was creating zombie processes and not clearing previous instances on decky refresh
 - fix the ui so that its fully usable with the controls, currently you have to use touch screen as a big chunk of the middle area in the overview tab is not focusable (it is in the code but theres probably a support issue there or something).
+- Id like a fullscreen ui potentially and also just to investigate if I can override some of the default decky styles and components and make stuff look and behave a bit nicer and more usable from a ui/ux perspective.
   
 
