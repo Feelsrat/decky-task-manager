@@ -763,7 +763,10 @@ class Plugin:
         return None
 
     def _install_release_zip(self, url: str) -> None:
+        decky.logger.info(f"Starting update installation from: {url}")
         plugin_dir = Path(decky.DECKY_PLUGIN_DIR)
+        decky.logger.info(f"Plugin directory: {plugin_dir}")
+        
         request = urllib.request.Request(
             url,
             headers={"User-Agent": "decky-task-manager"},
@@ -772,24 +775,38 @@ class Plugin:
         with tempfile.TemporaryDirectory(prefix="decky-task-manager-update-") as temp_root:
             temp_path = Path(temp_root)
             archive_path = temp_path / "release.zip"
+            decky.logger.info(f"Downloading to: {archive_path}")
 
             self._download_file(request, archive_path)
+            decky.logger.info(f"Download complete. File size: {archive_path.stat().st_size} bytes")
 
             extract_dir = temp_path / "extract"
+            decky.logger.info(f"Extracting to: {extract_dir}")
+            
             with zipfile.ZipFile(archive_path) as archive:
+                decky.logger.info(f"ZIP contains {len(archive.namelist())} files")
+                for name in archive.namelist()[:5]:  # Log first 5 files
+                    decky.logger.info(f"  - {name}")
                 self._safe_extract(archive, extract_dir)
-
+            
+            decky.logger.info("Extraction complete, looking for plugin...")
             extracted_plugin = self._find_extracted_plugin(extract_dir)
             if extracted_plugin is None:
+                decky.logger.error(f"No plugin.json found in extracted files. Contents: {list(extract_dir.iterdir())}")
                 raise ValueError("release zip did not contain a Decky plugin")
+            
+            decky.logger.info(f"Found plugin at: {extracted_plugin}")
 
             backup_dir = plugin_dir.with_name(f"{plugin_dir.name}.previous")
             if backup_dir.exists():
+                decky.logger.info(f"Removing old backup: {backup_dir}")
                 shutil.rmtree(backup_dir)
 
             if plugin_dir.exists():
+                decky.logger.info(f"Backing up current plugin to: {backup_dir}")
                 shutil.copytree(plugin_dir, backup_dir, ignore=shutil.ignore_patterns("*.log"))
-
+            
+            decky.logger.info("Installing updated files...")
             for item in extracted_plugin.iterdir():
                 target = plugin_dir / item.name
                 if target.exists():
@@ -802,6 +819,9 @@ class Plugin:
                     shutil.copytree(item, target)
                 else:
                     shutil.copy2(item, target)
+                decky.logger.info(f"  Installed: {item.name}")
+            
+            decky.logger.info("Update installation complete!")
 
     def _find_extracted_plugin(self, root: Path) -> Path | None:
         for candidate in [root, *root.iterdir()]:
@@ -823,19 +843,25 @@ class Plugin:
         archive.extractall(target)
 
     def _download_file(self, request: urllib.request.Request, target: Path) -> None:
+        decky.logger.info(f"Attempting download from: {request.full_url}")
+        
         # Try Python urllib with SSL context first
         try:
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
             
+            decky.logger.info("Trying Python urllib...")
             with urllib.request.urlopen(request, timeout=45, context=ssl_context) as response:
-                target.write_bytes(response.read())
+                data = response.read()
+                target.write_bytes(data)
+                decky.logger.info(f"Download successful via urllib: {len(data)} bytes")
                 return
         except (OSError, urllib.error.URLError) as error:
             decky.logger.warning(f"Python download failed, trying curl: {error}")
 
         # Fallback to curl
+        decky.logger.info("Trying curl fallback...")
         result = subprocess.run(
             ["curl", "-fL", "-k", "-A", "decky-task-manager", "-o", str(target), request.full_url],
             check=False,
@@ -844,7 +870,10 @@ class Plugin:
             timeout=60,
         )
         if result.returncode != 0:
+            decky.logger.error(f"curl failed with exit code {result.returncode}: {result.stderr}")
             raise urllib.error.URLError(result.stderr.strip() or f"curl exited {result.returncode}")
+        
+        decky.logger.info(f"Download successful via curl")
 
     def _schedule_loader_restart(self) -> bool:
         command = (
