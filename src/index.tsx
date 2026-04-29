@@ -248,6 +248,12 @@ const Dashboard: FC = () => {
   const activePlugins = plugins.filter((p) => (p.metrics?.processes || 0) > 0);
   const errorPlugins = plugins.filter((p) => (p.logs?.errors || 0) > 0);
 
+  // Calculate total plugin resource usage
+  const totalPluginCpu = activePlugins.reduce((sum, p) => sum + (p.metrics?.cpu || 0), 0);
+  const totalPluginRam = activePlugins.reduce((sum, p) => sum + (p.metrics?.memory || 0), 0);
+  const systemCpu = metrics?.cpu || 0;
+  const systemRamPercent = metrics?.memory.percent || 0;
+
   return (
     <>
       {/* Tab Navigation */}
@@ -272,39 +278,49 @@ const Dashboard: FC = () => {
       {/* Overview Tab */}
       {activeTab === "overview" && (
         <>
-          <PanelSection title="System">
+          <PanelSection title="Plugin Resources">
             <PanelSectionRow>
               <Field 
-                label={<><FaMicrochip /> CPU Usage{!state.monitoring && " ⚠️"}</>} 
-                description={state.monitoring ? `${metrics?.cpu || 0}%` : "Snapshot - Enable live monitoring for real-time"}
+                label={<><FaMicrochip /> Plugin CPU Usage{!state.monitoring && " ⚠️"}</>} 
+                description={state.monitoring 
+                  ? `${totalPluginCpu.toFixed(1)}% of ${systemCpu.toFixed(1)}% total` 
+                  : "Snapshot - Enable live monitoring for real-time"
+                }
               >
-                <div style={{ fontSize: "24px", fontWeight: "bold", color: (metrics?.cpu || 0) > 85 ? "#e74c3c" : "#3498db" }}>
-                  {metrics?.cpu || 0}%
+                <div style={{ fontSize: "24px", fontWeight: "bold", color: totalPluginCpu > 50 ? "#e74c3c" : "#3498db" }}>
+                  {totalPluginCpu.toFixed(1)}%
                 </div>
               </Field>
             </PanelSectionRow>
-            <ProgressBar value={metrics?.cpu || 0} danger={(metrics?.cpu || 0) > 85} />
+            <ProgressBar value={totalPluginCpu} danger={totalPluginCpu > 50} />
 
             <PanelSectionRow>
               <Field
-                label={<><FaMemory /> Memory Usage{!state.monitoring && " ⚠️"}</>}
+                label={<><FaMemory /> Plugin RAM Usage{!state.monitoring && " ⚠️"}</>}
                 description={state.monitoring 
-                  ? `${metrics?.memory.used || 0} / ${metrics?.memory.total || 0} MB` 
+                  ? `${totalPluginRam} MB used by ${activePlugins.length} plugin${activePlugins.length === 1 ? '' : 's'}` 
                   : "Snapshot - Enable live monitoring for real-time"
                 }
               >
                 <div style={{ fontSize: "24px", fontWeight: "bold", color: "#2ecc71" }}>
-                  {metrics?.memory.percent || 0}%
+                  {totalPluginRam} MB
                 </div>
               </Field>
             </PanelSectionRow>
-            <ProgressBar value={metrics?.memory.percent || 0} color="#2ecc71" />
+            <ProgressBar value={(totalPluginRam / (metrics?.memory.total || 16000)) * 100} color="#2ecc71" />
           </PanelSection>
 
           <PanelSection title="Status">
             <PanelSectionRow>
-              <Field label="Total Plugins" description={`${activePlugins.length} active`}>
-                <div style={{ fontSize: "20px", fontWeight: "600" }}>{plugins.length}</div>
+              <Field label="System Load" description={`${systemCpu.toFixed(1)}% CPU, ${systemRamPercent}% RAM`}>
+                <div style={{ fontSize: "16px", opacity: 0.8 }}>
+                  {systemCpu > 85 ? "⚠️ High" : systemCpu > 60 ? "Moderate" : "Normal"}
+                </div>
+              </Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <Field label="Active Plugins" description={`${plugins.length} total installed`}>
+                <div style={{ fontSize: "20px", fontWeight: "600" }}>{activePlugins.length}</div>
               </Field>
             </PanelSectionRow>
             <PanelSectionRow>

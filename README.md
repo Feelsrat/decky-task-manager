@@ -1,65 +1,32 @@
 # Decky Task Manager
 
-Decky Task Manager is a small Decky Loader plugin for checking what the rest of your plugins are doing without leaving the quick access menu.
+A lightweight Decky Loader plugin for monitoring your other plugins without leaving the quick access menu.
 
-It has two main areas:
+The plugin has three tabs. The Overview tab shows system CPU and RAM usage, along with which plugins are currently running and how much resources they're using. The Plugins tab lets you enable or disable any plugin with a single tap. The Logs tab scans error messages from plugin logs and groups similar ones together so you can see which plugins are having issues.
 
-- Plugin errors: scans Decky plugin logs, groups similar error lines, and lets you clear logs before testing something again.
-- System and plugins: shows CPU and RAM, maps usage back to plugin processes where Decky exposes enough info, and keeps the disable button beside each plugin.
+Live monitoring can be toggled on to watch CPU and RAM metrics in real time. When it's off, you get a snapshot of the last values. The plugin does micro-sampling every second when live monitoring is enabled, taking four quick samples to catch brief CPU spikes that might otherwise be missed. Testing mode clears all logs, resets metric peaks, and starts fresh monitoring so you can reproduce a problem cleanly.
 
-There is also a fullscreen view if the QAM feels too cramped. Live monitoring only runs while the panel or fullscreen page is open and switched on. Testing mode clears logs, resets metric peaks, and starts a fresh watch so you can reproduce a problem and come back to the useful bits. Updates can be checked and installed from GitHub releases once the repo is public.
+Updates can be checked and installed directly from the plugin once a new release is available on GitHub.
 
 ## Why
 
-Decky plugins are brilliant, but when one starts misbehaving it can be annoying to work out which one is making noise in the logs. This is meant to be a quick first look: which plugins are throwing errors, how loaded the Deck is right now, and which plugin you might want to disable before digging deeper.
+Decky plugins are great, but when one starts acting up it can be hard to figure out which one is causing problems. This plugin gives you a quick first look at what's going on: which plugins are throwing errors, how loaded your Deck is, and which plugins you might want to disable before investigating further.
 
 ## Notes
 
-- Disabling a plugin writes to Decky Loader's `disabled_plugins` setting and schedules a quick `plugin_loader.service` restart so the change applies.
-- Decky Task Manager will not disable itself.
-- The error count is a log scan, not a crash reporter. It is intentionally simple and may count noisy warning-style lines if a plugin logs them with words like `failed` or `error`.
-- The plugin uses Decky's root flag because it needs to read Decky settings and restart Decky Loader.
+Disabling a plugin writes to Decky Loader's disabled_plugins setting and triggers a plugin_loader service restart to apply the change immediately. Decky Task Manager won't let you disable itself.
+
+The error count comes from scanning log files, not from a crash reporter. It's intentionally simple and might count warning messages if a plugin logs them with words like "failed" or "error" in them.
+
+The plugin requires root permissions because it needs to read Decky settings and restart the plugin loader service.
+
+## Install
+
+Download the latest release ZIP and install it through Decky's developer mode in the settings menu.
 
 ## Development
 
-### Build
+Install dependencies and build the plugin with pnpm. Use `pnpm install` to get started, then `pnpm run build` to compile. Run `pnpm run watch` if you want automatic rebuilds during development. The test command validates Python syntax, TypeScript compilation, and required files before you release.
 
-```bash
-pnpm install    # Install dependencies
-pnpm run build  # Build the plugin
-pnpm run watch  # Watch mode for development
-pnpm run test   # Run validation tests
-```
-
-### Testing
-
-Before releasing, validate your plugin:
-
-```bash
-pnpm run test
-```
-
-This checks:
-- Python syntax errors
-- TypeScript build succeeds  
-- Required files exist
-- Plugin manifest is valid
-
-### Release
-
-```bash
-# One-time setup: Install and authenticate with GitHub CLI
-winget install GitHub.cli
-gh auth login
-
-# Build, test, package, and release to GitHub in one command
-pnpm run release
-```
-
-The release command automatically:
-1. Runs validation tests
-2. Cleans old build artifacts
-3. Builds the plugin
-4. Creates a zip package
-5. Creates a GitHub release with the zip attached
+To create a new release, make sure you have the GitHub CLI installed and authenticated with `gh auth login`. Then run `pnpm run release` which will bump the version, run tests, build everything, package it into a ZIP, and push a new release to GitHub.
 

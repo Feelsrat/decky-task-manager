@@ -315,7 +315,10 @@ class Plugin:
             **status,
             "ok": True,
             "restarted": restarted,
-            "message": f"Installed {status.get('latest')}. Decky Loader will restart.",
+            "message": (
+                "Update installed! Decky will restart now." if restarted
+                else "Update installed! Please restart Steam to apply changes."
+            ),
         }
 
     def _merge_plugin_data(
@@ -876,21 +879,32 @@ class Plugin:
         decky.logger.info(f"Download successful via curl")
 
     def _schedule_loader_restart(self) -> bool:
-        command = (
-            "sleep 1; "
-            "systemctl restart plugin_loader.service "
-            "|| systemctl --user restart plugin_loader.service"
-        )
-
-        try:
-            subprocess.Popen(
-                ["bash", "-lc", command],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError:
-            return False
-
-        return True
+        decky.logger.info("Attempting to restart Decky Loader...")
+        
+        # Try multiple restart methods
+        commands = [
+            "systemctl restart plugin_loader",           # System service
+            "systemctl --user restart plugin_loader",  # User service
+            "systemctl restart plugin_loader.service",
+            "systemctl --user restart plugin_loader.service",
+        ]
+        
+        for cmd in commands:
+            try:
+                decky.logger.info(f"Trying: {cmd}")
+                result = subprocess.run(
+                    ["bash", "-c", f"sleep 1; {cmd}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    decky.logger.info(f"✓ Restart scheduled via: {cmd}")
+                    return True
+                else:
+                    decky.logger.warning(f"Failed ({result.returncode}): {result.stderr.strip()}")
+            except Exception as error:
+                decky.logger.warning(f"Exception with '{cmd}': {error}")
+        
+        decky.logger.error("All restart methods failed - manual restart required")
+        return False
