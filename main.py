@@ -60,23 +60,62 @@ class Plugin:
         }
 
     async def get_metrics(self) -> dict[str, Any]:
+        """
+        Get system and plugin metrics with peak detection.
+        Samples multiple times over ~200ms to catch short spikes.
+        """
         first = self._read_cpu_times()
         if self._previous_cpu is None:
             await asyncio.sleep(0.15)
             first = self._read_cpu_times()
 
-        processes = self._read_plugin_processes(self._list_plugins())
+        # Take multiple samples to catch spikes (4 samples over 200ms)
+        peak_samples: list[dict[str, Any]] = []
+        for _ in range(4):
+            processes = self._read_plugin_processes(self._list_plugins())
+            sample_cpu = self._read_cpu_times()
+            plugin_metrics = self._plugin_metrics(processes, sample_cpu)
+            peak_samples.append({
+                "plugins": plugin_metrics,
+                "cpu": self._cpu_percent(first, sample_cpu),
+                "memory": self._read_memory(),
+            })
+            await asyncio.sleep(0.05)  # 50ms between samples
+        
+        # Merge peaks: for each plugin, take the highest CPU/RAM seen
+        merged_plugins: dict[str, dict[str, Any]] = {}
+        for sample in peak_samples:
+            for plugin in sample["plugins"]:
+                name = plugin["name"]
+                if name not in merged_plugins:
+                    merged_plugins[name] = plugin.copy()
+                else:
+                    # Take peak values
+                    if plugin["cpu"] > merged_plugins[name]["cpu"]:
+                        merged_plugins[name]["cpu"] = plugin["cpu"]
+                        merged_plugins[name]["peakCpu"] = plugin["cpu"]
+                    if plugin["memory"] > merged_plugins[name]["memory"]:
+                        merged_plugins[name]["memory"] = plugin["memory"]
+                        merged_plugins[name]["peakMemory"] = plugin["memory"]
+                    # Update spike status if any sample showed spike
+                    if plugin["spike"]:
+                        merged_plugins[name]["spike"] = True
+                        merged_plugins[name]["spikeReason"] = plugin["spikeReason"]
+        
+        # Use last sample for system metrics, merged for plugins
         now = time.time()
         metrics = {
             "timestamp": now,
-            "cpu": self._cpu_percent(self._previous_cpu or first, first),
-            "memory": self._read_memory(),
-            "plugins": self._plugin_metrics(processes, first),
+            "cpu": peak_samples[-1]["cpu"],  # Last sample for system
+            "memory": peak_samples[-1]["memory"],
+            "plugins": list(merged_plugins.values()),
         }
 
-        self._previous_cpu = first
+        final_cpu = self._read_cpu_times()
+        self._previous_cpu = final_cpu
         self._previous_processes = {
-            process["pid"]: process["cpu_time"] for process in processes
+            process["pid"]: process["cpu_time"] 
+            for process in self._read_plugin_processes(self._list_plugins())
         }
         self._remember(metrics)
         return metrics

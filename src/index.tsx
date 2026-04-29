@@ -21,7 +21,7 @@ import {
   FaPlay,
 } from "react-icons/fa";
 
-const POLL_MS = 2000;
+const POLL_MS = 1000; // Poll every 1s - backend does 4x micro-sampling (50ms) to catch sharp spikes
 
 // Types
 type PluginMetrics = {
@@ -73,7 +73,7 @@ const installUpdate = callable<[], UpdateStatus>("install_update");
 // Main Hook
 function useTaskManager() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
-  const [monitoring, setMonitoring] = useState(false);
+  const [monitoring, setMonitoring] = useState(false); // OFF by default to reduce overhead
   const [loading, setLoading] = useState(false);
   const [busyPlugin, setBusyPlugin] = useState<string>();
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
@@ -274,7 +274,10 @@ const Dashboard: FC = () => {
         <>
           <PanelSection title="System">
             <PanelSectionRow>
-              <Field label={<><FaMicrochip /> CPU Usage</>} description={`${metrics?.cpu || 0}%`}>
+              <Field 
+                label={<><FaMicrochip /> CPU Usage{!state.monitoring && " ⚠️"}</>} 
+                description={state.monitoring ? `${metrics?.cpu || 0}%` : "Snapshot - Enable live monitoring for real-time"}
+              >
                 <div style={{ fontSize: "24px", fontWeight: "bold", color: (metrics?.cpu || 0) > 85 ? "#e74c3c" : "#3498db" }}>
                   {metrics?.cpu || 0}%
                 </div>
@@ -284,8 +287,11 @@ const Dashboard: FC = () => {
 
             <PanelSectionRow>
               <Field
-                label={<><FaMemory /> Memory Usage</>}
-                description={`${metrics?.memory.used || 0} / ${metrics?.memory.total || 0} MB`}
+                label={<><FaMemory /> Memory Usage{!state.monitoring && " ⚠️"}</>}
+                description={state.monitoring 
+                  ? `${metrics?.memory.used || 0} / ${metrics?.memory.total || 0} MB` 
+                  : "Snapshot - Enable live monitoring for real-time"
+                }
               >
                 <div style={{ fontSize: "24px", fontWeight: "bold", color: "#2ecc71" }}>
                   {metrics?.memory.percent || 0}%
@@ -314,7 +320,7 @@ const Dashboard: FC = () => {
             <PanelSectionRow>
               <ToggleField
                 label="Live Monitoring"
-                description={state.monitoring ? "Updates every 2s" : "Paused"}
+                description={state.monitoring ? "Updating every 1s (micro-sampling for spikes)" : "OFF - Showing snapshot only"}
                 checked={state.monitoring}
                 onChange={(val) => state.setMonitoring(val)}
               />
@@ -327,6 +333,19 @@ const Dashboard: FC = () => {
             <div style={{ padding: "8px 16px", fontSize: "12px", opacity: 0.7, lineHeight: 1.4 }}>
               Test mode clears logs and metrics, then starts monitoring. Use this to reproduce issues.
             </div>
+            {!state.monitoring && (
+              <div style={{ 
+                padding: "8px 16px", 
+                fontSize: "12px", 
+                color: "#f39c12", 
+                lineHeight: 1.4,
+                background: "rgba(243, 156, 18, 0.1)",
+                borderRadius: "4px",
+                margin: "8px 16px"
+              }}>
+                ⚠️ Live monitoring is OFF. CPU/RAM metrics are snapshots only and may be outdated.
+              </div>
+            )}
           </PanelSection>
 
           <PanelSection title="Updates">
@@ -373,23 +392,41 @@ const Dashboard: FC = () => {
                 const metrics = plugin.metrics;
                 const hasErrors = (plugin.logs?.errors || 0) > 0;
                 const hasSpike = metrics?.spike;
+                const isCpuSpike = hasSpike && metrics.spikeReason?.toLowerCase().includes('cpu');
+                const isRamSpike = hasSpike && metrics.spikeReason?.toLowerCase().includes('ram');
 
                 return (
                   <PanelSectionRow key={plugin.name}>
                     <Field
-                      label={plugin.name}
+                      label={
+                        <span>
+                          {hasSpike && "🔥 "}
+                          {plugin.name}
+                          {hasSpike && " 🔥"}
+                        </span>
+                      }
                       description={
                         <>
                           {plugin.version && `v${plugin.version} · `}
                           {metrics?.processes || 0} process{metrics?.processes === 1 ? "" : "es"}
                           {hasErrors && ` · ${plugin.logs?.errors} errors`}
-                          {hasSpike && ` · ⚠️ ${metrics.spikeReason} spike`}
+                          {hasSpike && (
+                            <span style={{ color: "#e74c3c", fontWeight: "bold" }}>
+                              {" "}· ⚠️ {metrics.spikeReason}
+                            </span>
+                          )}
                         </>
                       }
                     >
                       <div style={{ fontSize: "14px" }}>
-                        <div>CPU: <span style={{ color: hasSpike && metrics.spikeReason === "cpu" ? "#e74c3c" : "#3498db" }}>{metrics?.cpu || 0}%</span></div>
-                        <div>RAM: <span style={{ color: hasSpike && metrics.spikeReason === "ram" ? "#e74c3c" : "#2ecc71" }}>{metrics?.memory || 0} MB</span></div>
+                        <div>CPU: <span style={{ 
+                          color: isCpuSpike ? "#e74c3c" : "#3498db",
+                          fontWeight: isCpuSpike ? "bold" : "normal"
+                        }}>{metrics?.cpu?.toFixed(1) || 0}%</span></div>
+                        <div>RAM: <span style={{ 
+                          color: isRamSpike ? "#e74c3c" : "#2ecc71",
+                          fontWeight: isRamSpike ? "bold" : "normal"
+                        }}>{metrics?.memory || 0} MB</span></div>
                       </div>
                     </Field>
                     <ButtonItem
