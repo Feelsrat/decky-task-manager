@@ -1,6 +1,6 @@
 {
   "name": "decky-task-manager",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "A lightweight Decky panel for plugin log errors, system metrics, and disabling plugins.",
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yuri/decky-task-manager.git"
+    "url": "git+https://github.com/Feelsrat/decky-task-manager.git"
   },
   "keywords": [
     "decky",
@@ -26,9 +26,9 @@
   ],
   "author": "yuri",
   "bugs": {
-    "url": "https://github.com/yuri/decky-task-manager/issues"
+    "url": "https://github.com/Feelsrat/decky-task-manager/issues"
   },
-  "homepage": "https://github.com/yuri/decky-task-manager#readme",
+  "homepage": "https://github.com/Feelsrat/decky-task-manager#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
     "@decky/ui": "^4.11.0",

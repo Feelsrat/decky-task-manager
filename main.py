@@ -45,6 +45,13 @@ LOG_ALERT_POLL_SECONDS = 5.0
 LOG_SPAM_BYTES_PER_SECOND = 4096
 LOG_SPAM_LINES_PER_SECOND = 10
 LOG_SPAM_ERRORS_PER_SECOND = 1.0
+LOADER_SETTINGS_RELATIVE = Path("settings") / "loader.json"
+# Decky's bundled Python may not find the system CA store on its own.
+CA_BUNDLE_CANDIDATES = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+)
 
 SEVERITY_RANK = {
     "info": 0,
@@ -130,6 +137,7 @@ class Plugin:
         self._history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
         self._last_update_error = ""
         self._cached_update_status: dict[str, Any] | None = None
+        self._latest_asset: dict[str, Any] | None = None
         self._last_check_time = 0.0
         self._auto_update_task: asyncio.Task[None] | None = None
         self._install_lock = asyncio.Lock()
@@ -210,9 +218,10 @@ class Plugin:
             first = self._read_cpu_times()
 
         # Take multiple samples to catch spikes (4 samples over 200ms)
+        plugins = self._list_plugins()
         peak_samples: list[dict[str, Any]] = []
         for _ in range(4):
-            processes = self._read_plugin_processes(self._list_plugins())
+            processes = self._read_plugin_processes(plugins)
             sample_cpu = self._read_cpu_times()
             plugin_metrics = self._plugin_metrics(processes, sample_cpu)
             peak_samples.append({
@@ -255,7 +264,7 @@ class Plugin:
         self._previous_cpu = final_cpu
         self._previous_processes = {
             process["pid"]: process["cpu_time"] 
-            for process in self._read_plugin_processes(self._list_plugins())
+            for process in self._read_plugin_processes(plugins)
         }
         self._remember(metrics)
         return metrics
@@ -329,6 +338,8 @@ class Plugin:
     async def clear_logs(self, name: str | None = None) -> dict[str, Any]:
         plugins = self._list_plugins()
         wanted = {name} if name else {plugin["name"] for plugin in plugins}
+        log_root = Path(decky.DECKY_HOME) / "logs"
+        log_files = self._log_files(log_root)
         cleared = 0
         failed = 0
 
@@ -336,7 +347,7 @@ class Plugin:
             if plugin["name"] not in wanted:
                 continue
 
-            for log_path in self._log_paths_for_plugin(Path(decky.DECKY_HOME) / "logs", plugin):
+            for log_path in self._log_paths_for_plugin(log_root, plugin, log_files):
                 try:
                     log_path.write_text("", encoding="utf-8")
                     cleared += 1
@@ -360,27 +371,7 @@ class Plugin:
         if name not in valid_names:
             return {"ok": False, "message": f"{name} was not found."}
 
-        settings_path = Path(decky.DECKY_HOME) / "settings" / "loader.json"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-        settings: dict[str, Any] = {}
-        if settings_path.exists():
-            try:
-                settings = json.loads(settings_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                backup_path = settings_path.with_suffix(".json.bak")
-                backup_path.write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
-                decky.logger.warning("Backed up unreadable loader settings to %s", backup_path)
-
-        disabled_plugins = settings.get("disabled_plugins", [])
-        if not isinstance(disabled_plugins, list):
-            disabled_plugins = []
-
-        if name not in disabled_plugins:
-            disabled_plugins.append(name)
-
-        settings["disabled_plugins"] = disabled_plugins
-        settings_path.write_text(json.dumps(settings, indent=4), encoding="utf-8")
+        self._set_plugin_disabled(name, True)
 
         restart = self._schedule_loader_restart("plugin disabled")
         return {
@@ -397,27 +388,7 @@ class Plugin:
         if name not in valid_names:
             return {"ok": False, "message": f"{name} was not found."}
 
-        settings_path = Path(decky.DECKY_HOME) / "settings" / "loader.json"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-        settings: dict[str, Any] = {}
-        if settings_path.exists():
-            try:
-                settings = json.loads(settings_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                backup_path = settings_path.with_suffix(".json.bak")
-                backup_path.write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
-                decky.logger.warning("Backed up unreadable loader settings to %s", backup_path)
-
-        disabled_plugins = settings.get("disabled_plugins", [])
-        if not isinstance(disabled_plugins, list):
-            disabled_plugins = []
-
-        if name in disabled_plugins:
-            disabled_plugins.remove(name)
-
-        settings["disabled_plugins"] = disabled_plugins
-        settings_path.write_text(json.dumps(settings, indent=4), encoding="utf-8")
+        self._set_plugin_disabled(name, False)
 
         restart = self._schedule_loader_restart("plugin enabled")
         return {
@@ -524,6 +495,7 @@ class Plugin:
         elevated = self._has_elevated_permissions()
         release = self._latest_release()
         if release is None:
+            self._latest_asset = None
             detail = f" {self._last_update_error}" if self._last_update_error else ""
             result = {
                 "ok": False,
@@ -536,6 +508,7 @@ class Plugin:
         else:
             latest = str(release.get("tag_name", "")).removeprefix("v")
             asset = self._release_asset(release)
+            self._latest_asset = asset
             # Use semantic version comparison instead of string equality (DSA: Tuple Comparison)
             has_update = bool(latest and self._is_newer_version(current, latest) and asset)
             can_install = bool(asset)
@@ -556,11 +529,12 @@ class Plugin:
                 ),
             }
 
-        # Cache the result
-        self._cached_update_status = result
-        self._last_check_time = time.time()
+        # Cache successful checks only, so a transient network failure is not remembered for a day
+        if result["ok"]:
+            self._cached_update_status = result
+            self._last_check_time = time.time()
         self._update_last_check_time()
-        
+
         return result
 
     async def install_update(self) -> dict[str, Any]:
@@ -584,8 +558,7 @@ class Plugin:
                     "message": "No release zip was found.",
                 }
 
-            release = self._latest_release()
-            asset = self._release_asset(release or {})
+            asset = self._latest_asset
             if asset is None:
                 return {
                     **status,
@@ -761,8 +734,9 @@ class Plugin:
             "noisyPlugins": 0,
         }
 
+        log_files = self._log_files(log_root)
         for plugin in plugins:
-            paths = self._log_paths_for_plugin(log_root, plugin)
+            paths = self._log_paths_for_plugin(log_root, plugin, log_files)
             errors = 0
             examples: list[str] = []
             grouped: dict[str, dict[str, Any]] = {}
@@ -1016,27 +990,36 @@ class Plugin:
 
         return severity
 
-    def _log_paths_for_plugin(self, log_root: Path, plugin: dict[str, Any]) -> list[Path]:
+    def _log_files(self, log_root: Path) -> list[Path]:
         if not log_root.exists():
             return []
 
+        return sorted(candidate for candidate in log_root.rglob("*") if candidate.is_file())
+
+    def _log_paths_for_plugin(
+        self,
+        log_root: Path,
+        plugin: dict[str, Any],
+        log_files: list[Path],
+    ) -> list[Path]:
         names = {
             str(plugin["folder"]).lower(),
             str(plugin["name"]).lower(),
             str(plugin["name"]).lower().replace(" ", "-"),
             str(plugin["name"]).lower().replace(" ", "_"),
         }
+        names.discard("")
         paths: list[Path] = []
 
-        for candidate in log_root.rglob("*"):
-            if not candidate.is_file():
-                continue
-
-            lowered = str(candidate.relative_to(log_root)).lower()
-            if any(name and name in lowered for name in names):
+        for candidate in log_files:
+            relative = candidate.relative_to(log_root)
+            folders = {part.lower() for part in relative.parts[:-1]}
+            stem = relative.name.lower().split(".", 1)[0]
+            # Exact folder/file-name matches only, so "audio" does not claim "audioloader" logs
+            if folders & names or stem in names:
                 paths.append(candidate)
 
-        return sorted(paths)
+        return paths
 
     def _tail_lines(self, path: Path) -> list[str]:
         try:
@@ -1277,8 +1260,47 @@ class Plugin:
             "percent": percent,
         }
 
+    def _set_plugin_disabled(self, name: str, disabled: bool) -> None:
+        settings_path = Path(decky.DECKY_HOME) / LOADER_SETTINGS_RELATIVE
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+        settings: dict[str, Any] = {}
+        if settings_path.exists():
+            raw = settings_path.read_text(encoding="utf-8")
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    settings = loaded
+            except json.JSONDecodeError:
+                backup_path = settings_path.with_suffix(".json.bak")
+                backup_path.write_text(raw, encoding="utf-8")
+                decky.logger.warning("Backed up unreadable loader settings to %s", backup_path)
+
+        disabled_plugins = settings.get("disabled_plugins", [])
+        if not isinstance(disabled_plugins, list):
+            disabled_plugins = []
+
+        if disabled and name not in disabled_plugins:
+            disabled_plugins.append(name)
+        elif not disabled:
+            disabled_plugins = [item for item in disabled_plugins if item != name]
+
+        settings["disabled_plugins"] = disabled_plugins
+
+        # Write atomically so a crash mid-write cannot corrupt Decky's settings
+        temp_path = settings_path.with_name(f".{settings_path.name}.tmp")
+        temp_path.write_text(json.dumps(settings, indent=4), encoding="utf-8")
+        try:
+            existing = settings_path.stat()
+            os.chmod(temp_path, existing.st_mode & 0o777)
+            if hasattr(os, "chown"):
+                os.chown(temp_path, existing.st_uid, existing.st_gid)
+        except OSError:
+            pass
+        os.replace(temp_path, settings_path)
+
     def _disabled_plugins(self) -> set[str]:
-        settings_path = Path(decky.DECKY_HOME) / "settings" / "loader.json"
+        settings_path = Path(decky.DECKY_HOME) / LOADER_SETTINGS_RELATIVE
         if not settings_path.exists():
             return set()
 
@@ -1355,10 +1377,7 @@ class Plugin:
         # Try Python urllib with SSL context first (if SSL is available)
         if SSL_AVAILABLE:
             try:
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                
+                ssl_context = self._ssl_context()
                 request = urllib.request.Request(
                     url,
                     headers={
@@ -1377,24 +1396,24 @@ class Plugin:
         # Fallback to curl
         try:
             result = subprocess.run(
-                ["curl", "-fsSL", "-k", "-H", "Accept: application/vnd.github+json", "-A", "decky-task-manager", url],
+                ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json", "-A", "decky-task-manager", url],
                 check=False,
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            self._last_update_error += f"; curl failed: {error}"
+            self._append_update_error(f"curl failed: {error}")
             return None
 
         if result.returncode != 0:
-            self._last_update_error += f"; curl exited {result.returncode}: {result.stderr.strip()[-120:]}"
+            self._append_update_error(f"curl exited {result.returncode}: {result.stderr.strip()[-120:]}")
             return None
 
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as error:
-            self._last_update_error += f"; curl JSON parse failed: {error}"
+            self._append_update_error(f"curl JSON parse failed: {error}")
             return None
 
     def _release_asset(self, release: dict[str, Any]) -> dict[str, Any] | None:
@@ -1540,10 +1559,7 @@ class Plugin:
         # Try Python urllib with SSL context first (if SSL is available)
         if SSL_AVAILABLE:
             try:
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                
+                ssl_context = self._ssl_context()
                 decky.logger.info("Trying Python urllib...")
                 with urllib.request.urlopen(request, timeout=45, context=ssl_context) as response:
                     data = response.read()
@@ -1558,7 +1574,7 @@ class Plugin:
         # Fallback to curl
         decky.logger.info("Trying curl fallback...")
         result = subprocess.run(
-            ["curl", "-fL", "-k", "-A", "decky-task-manager", "-o", str(target), request.full_url],
+            ["curl", "-fsSL", "-A", "decky-task-manager", "-o", str(target), request.full_url],
             check=False,
             capture_output=True,
             text=True,
@@ -1568,7 +1584,19 @@ class Plugin:
             decky.logger.error(f"curl failed with exit code {result.returncode}: {result.stderr}")
             raise urllib.error.URLError(result.stderr.strip() or f"curl exited {result.returncode}")
         
-        decky.logger.info(f"Download successful via curl")
+        decky.logger.info("Download successful via curl")
+
+    def _ssl_context(self) -> "ssl.SSLContext":
+        context = ssl.create_default_context()
+        if context.cert_store_stats().get("x509_ca", 0) == 0:
+            for bundle in CA_BUNDLE_CANDIDATES:
+                if os.path.exists(bundle):
+                    context.load_verify_locations(cafile=bundle)
+                    break
+        return context
+
+    def _append_update_error(self, message: str) -> None:
+        self._last_update_error = f"{self._last_update_error}; {message}" if self._last_update_error else message
 
     def _schedule_loader_restart(self, reason: str) -> dict[str, Any]:
         decky.logger.info("Scheduling Decky Loader restart: %s", reason)

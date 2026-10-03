@@ -1,5 +1,6 @@
 import {
   ButtonItem,
+  DialogButton,
   Field,
   Focusable,
   PanelSection,
@@ -8,7 +9,7 @@ import {
   staticClasses,
 } from "@decky/ui";
 import { callable, definePlugin, toaster } from "@decky/api";
-import { useEffect, useRef, useState, FC, ReactNode } from "react";
+import { useEffect, useState, FC } from "react";
 import {
   FaBan,
   FaCheck,
@@ -23,6 +24,9 @@ import {
 } from "react-icons/fa";
 
 const POLL_MS = 1000; // Poll every 1s - backend does 4x micro-sampling (50ms) to catch sharp spikes
+
+// Module scope so alerts are not re-toasted every time the QAM panel remounts
+const alertedLogKeys = new Set<string>();
 
 const severityRank: Record<Severity, number> = {
   info: 0,
@@ -179,7 +183,7 @@ function useTaskManager() {
         metrics,
         plugins: current.plugins.map((p) => ({
           ...p,
-          metrics: metrics.plugins.find((m) => m.name === p.name) || p.metrics,
+          metrics: metrics.plugins.find((m) => m.name === p.name),
         })),
       };
     });
@@ -405,48 +409,19 @@ const ProgressBar: FC<{ value: number; color?: string; danger?: boolean }> = ({ 
   </div>
 );
 
-const SquareIconButton: FC<{
-  label: string;
-  disabled?: boolean;
-  danger?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}> = ({ label, disabled, danger, onClick, children }) => {
-  const activate = () => {
-    if (!disabled) onClick();
-  };
-
-  return (
-    <Focusable
-      role="button"
-      aria-label={label}
-      aria-disabled={disabled}
-      title={label}
-      onActivate={activate}
-      onClick={activate}
-      style={{
-        width: "32px",
-        minWidth: "32px",
-        height: "32px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "4px",
-        background: danger ? "rgba(231, 76, 60, 0.22)" : "rgba(255,255,255,0.10)",
-        color: danger ? "#ff8a80" : "rgba(255,255,255,0.88)",
-        opacity: disabled ? 0.45 : 1,
-      }}
-    >
-      {children}
-    </Focusable>
-  );
+const rowButtonStyle = {
+  minWidth: 0,
+  padding: "8px 10px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "6px",
 };
 
 // Main Dashboard Component
 const Dashboard: FC = () => {
   const state = useTaskManager();
   const [activeTab, setActiveTab] = useState<"overview" | "plugins" | "logs">("overview");
-  const alertedLogKeys = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const plugins = state.snapshot?.plugins || [];
@@ -457,8 +432,8 @@ const Dashboard: FC = () => {
       for (const issue of logs.knownIssues || []) {
         if (severityRank[issue.severity] < severityRank.high) continue;
         const key = `${plugin.name}:issue:${issue.id}`;
-        if (alertedLogKeys.current.has(key)) continue;
-        alertedLogKeys.current.add(key);
+        if (alertedLogKeys.has(key)) continue;
+        alertedLogKeys.add(key);
         toaster.toast({
           title: `${plugin.name}: ${issue.title}`,
           body: issue.advice,
@@ -468,8 +443,8 @@ const Dashboard: FC = () => {
 
       for (const alert of logs.alerts || []) {
         const key = `${plugin.name}:alert:${alert.id}`;
-        if (alertedLogKeys.current.has(key)) continue;
-        alertedLogKeys.current.add(key);
+        if (alertedLogKeys.has(key)) continue;
+        alertedLogKeys.add(key);
         toaster.toast({
           title: `${plugin.name}: ${alert.title}`,
           body: alert.message,
@@ -736,36 +711,36 @@ const Dashboard: FC = () => {
                         </span></div>
                       </div>
                     </Field>
-                    <div style={{ display: "flex", gap: "6px", alignItems: "center", width: "100%" }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <ButtonItem
-                          layout="below"
-                          onClick={() => state.handleTogglePlugin(plugin.name, plugin.disabled)}
-                          disabled={state.busyPlugin === plugin.name || state.killingPlugin === plugin.name}
-                        >
-                          {state.busyPlugin === plugin.name ? (
-                            plugin.disabled ? "Enabling..." : "Disabling..."
-                          ) : (
-                            <><FaBan /> Disable</>
-                          )}
-                        </ButtonItem>
-                      </div>
-                      <SquareIconButton
-                        label={`Kill ${plugin.name}`}
-                        danger
+                    <Focusable flow-children="horizontal" style={{ display: "flex", gap: "6px", width: "100%", paddingBottom: "8px" }}>
+                      <DialogButton
+                        style={{ ...rowButtonStyle, flex: 1 }}
+                        onClick={() => state.handleTogglePlugin(plugin.name, plugin.disabled)}
+                        disabled={state.busyPlugin === plugin.name || state.killingPlugin === plugin.name}
+                      >
+                        {state.busyPlugin === plugin.name ? (
+                          plugin.disabled ? "Enabling..." : "Disabling..."
+                        ) : plugin.disabled ? (
+                          <><FaPlay /> Enable</>
+                        ) : (
+                          <><FaBan /> Disable</>
+                        )}
+                      </DialogButton>
+                      <DialogButton
+                        aria-label={`Kill ${plugin.name}`}
+                        style={{ ...rowButtonStyle, flex: "0 0 auto", width: "48px", color: "#ff8a80" }}
                         onClick={() => state.handleKillPlugin(plugin.name)}
                         disabled={state.killingPlugin === plugin.name || state.busyPlugin === plugin.name}
                       >
                         <FaTimes />
-                      </SquareIconButton>
-                    </div>
+                      </DialogButton>
+                    </Focusable>
                   </PanelSectionRow>
                 );
               })
             )}
           </PanelSection>
 
-          <PanelSection title={`All Plugins (${plugins.length})`}>
+          <PanelSection title={`Idle & Disabled Plugins (${plugins.length - activePlugins.length})`}>
             {plugins.map((plugin) => {
               const isActive = (plugin.metrics?.processes || 0) > 0;
               if (isActive) return null; // Already shown above
@@ -776,8 +751,8 @@ const Dashboard: FC = () => {
                     label={plugin.name}
                     description={plugin.disabled ? "Disabled" : "Idle"}
                   >
-                    <ButtonItem
-                      layout="below"
+                    <DialogButton
+                      style={{ ...rowButtonStyle, width: "110px" }}
                       onClick={() => state.handleTogglePlugin(plugin.name, plugin.disabled)}
                       disabled={state.busyPlugin === plugin.name}
                     >
@@ -788,7 +763,7 @@ const Dashboard: FC = () => {
                       ) : (
                         <><FaBan /> Disable</>
                       )}
-                    </ButtonItem>
+                    </DialogButton>
                   </Field>
                 </PanelSectionRow>
               );
@@ -865,7 +840,7 @@ const Dashboard: FC = () => {
                   </PanelSectionRow>
                 )}
 
-                {plugin.logs?.examples.slice(0, 2).map((example, i) => (
+                {(plugin.logs?.examples || []).slice(0, 2).map((example, i) => (
                   <Focusable key={i} style={{ padding: "12px 16px" }}>
                     <div
                       style={{

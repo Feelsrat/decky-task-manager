@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
+import json
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -145,6 +147,69 @@ class BackendMockTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("cannot kill itself", result["message"])
+
+    async def test_enable_and_disable_plugin_preserve_other_loader_settings(self):
+        plugin = self.module.Plugin()
+        plugin._list_plugins = lambda: [{"name": "Sample Plugin", "folder": "sample-plugin"}]
+        plugin._schedule_loader_restart = lambda _reason: {"scheduled": False, "method": "", "message": ""}
+
+        with tempfile.TemporaryDirectory() as home:
+            self.module.decky.DECKY_HOME = home
+            settings_path = Path(home) / "settings" / "loader.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(json.dumps({"branch": 0, "disabled_plugins": ["Other"]}), encoding="utf-8")
+
+            disabled = await plugin.disable_plugin("Sample Plugin")
+            after_disable = json.loads(settings_path.read_text(encoding="utf-8"))
+            enabled = await plugin.enable_plugin("Sample Plugin")
+            after_enable = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(disabled["ok"])
+        self.assertTrue(enabled["ok"])
+        self.assertEqual(after_disable, {"branch": 0, "disabled_plugins": ["Other", "Sample Plugin"]})
+        self.assertEqual(after_enable, {"branch": 0, "disabled_plugins": ["Other"]})
+
+    def test_log_paths_only_match_exact_plugin_names(self):
+        plugin = self.module.Plugin()
+
+        with tempfile.TemporaryDirectory() as root:
+            log_root = Path(root)
+            for relative in [
+                "audio/2026-01-01.log",
+                "audioloader/2026-01-01.log",
+                "audio.log",
+                "audioloader.log",
+            ]:
+                path = log_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+
+            paths = plugin._log_paths_for_plugin(
+                log_root,
+                {"name": "Audio", "folder": "audio"},
+                plugin._log_files(log_root),
+            )
+            relative_paths = sorted(path.relative_to(log_root).as_posix() for path in paths)
+
+        self.assertEqual(relative_paths, ["audio.log", "audio/2026-01-01.log"])
+
+    async def test_failed_update_check_is_not_cached(self):
+        plugin = self.module.Plugin()
+        plugin._current_version = lambda: "0.1.0"
+        plugin._update_last_check_time = lambda: None
+        plugin._latest_release = lambda: None
+
+        failed = await plugin.check_update()
+        self.assertFalse(failed["ok"])
+        self.assertIsNone(plugin._cached_update_status)
+
+        plugin._latest_release = lambda: {
+            "tag_name": "v0.2.0",
+            "assets": [{"name": "decky-task-manager.zip", "browser_download_url": "https://example.invalid"}],
+        }
+        recovered = await plugin.check_update()
+        self.assertTrue(recovered["ok"])
+        self.assertTrue(recovered["hasUpdate"])
 
 
 if __name__ == "__main__":

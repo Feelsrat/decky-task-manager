@@ -6,7 +6,7 @@ The plugin has three tabs. The Overview tab shows system CPU and RAM usage, alon
 
 Live monitoring can be toggled on to watch CPU and RAM metrics in real time, and it keeps running in the backend if you close the quick access menu. When it's off, you get a snapshot of the last values. The plugin does micro-sampling every second when live monitoring is enabled, taking four quick samples to catch brief CPU spikes that might otherwise be missed. Each plugin tracks current CPU/RAM and max CPU/RAM since the last metric reset, so short spikes remain visible after the current value drops. Testing mode clears all logs and metric peaks, then starts fresh monitoring so you can reproduce a problem cleanly. !!! DO NOT LEAVE THIS ON !!! (probably idk, havent tested it that much yet)
 
-Updates can be checked and installed directly from the plugin once a new release is available on GitHub. Update installation requires Decky root permissions, stages and validates the downloaded release, replaces the plugin directory, updates the reported version, and schedules a Decky Loader restart so the new files and backend process are picked up.
+Updates can be checked and installed directly from the plugin once a new release is available on GitHub. Downloads use verified HTTPS. Update installation requires Decky root permissions, stages and validates the downloaded release, replaces the plugin directory, updates the reported version, and schedules a Decky Loader restart so the new files and backend process are picked up.
 
 ## Why
 
@@ -42,7 +42,9 @@ Smoke-test updater replacement/restart on a Steam Deck before publishing a publi
 
 To create a new release, make sure you have the GitHub CLI installed and authenticated with `gh auth login`. Then run `pnpm run release` which will bump the version, run tests, build everything, package it into a ZIP, and create a new release on GitHub. Use `pnpm run release -- --private` to create a draft release for review before publishing it.
 
+Releases can also be published from GitHub Actions: bump the version in `package.json`, commit, then push an annotated tag that matches it (`git tag -a v0.1.20 -m "release notes" && git push origin v0.1.20`). The workflow runs the tests, builds the ZIP, and publishes the release using the tag message as the notes.
+
 ## TODO
 
-- Check for feasability of drawing an overlay when monitoring is enabled
-- Fix the poxy x buttons that kill processes, they work but not with the physical controls
+- Check for feasibility of drawing an overlay when monitoring is enabled
+- Confirm the Disable / kill (X) buttons on the Plugins tab work with the physical controls on a Steam Deck (switched to native Steam buttons in 0.1.20)
