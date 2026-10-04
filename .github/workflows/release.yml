@@ -1,9 +1,19 @@
 name: Release
 
+# Two ways to release:
+#   - push an annotated tag matching package.json (git tag -a v1.2.3 -m "notes"), or
+#   - run this workflow manually from the Actions tab on main; it tags the commit
+#     with the package.json version and uses the "notes" input as release notes.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: Release notes (Markdown). Leave empty to generate from commits.
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -27,13 +37,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check tag matches package.json version
+      - name: Work out the release tag
+        id: tag
         run: |
           version="$(node -p "require('./package.json').version")"
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+              exit 1
+            fi
+          elif git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null; then
+            echo "v${version} already exists. Bump the version in package.json first."
             exit 1
           fi
+          echo "name=v${version}" >> "$GITHUB_OUTPUT"
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test
@@ -41,15 +58,22 @@ jobs:
 
       # actions/checkout drops the annotated tag message, which is used as the release notes
       - name: Fetch annotated tag
+        if: github.event_name == 'push'
         run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+          NOTES: ${{ inputs.notes }}
         run: |
-          prerelease=""
-          case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "${GITHUB_REF_NAME}" decky-task-manager.zip \
-            --title "Decky Task Manager ${GITHUB_REF_NAME}" \
-            --notes-from-tag \
-            ${prerelease}
+          args=(--title "Decky Task Manager ${TAG}")
+          case "${TAG}" in *-*) args+=(--prerelease) ;; esac
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            args+=(--notes-from-tag)
+          elif [ -n "${NOTES}" ]; then
+            args+=(--target "${GITHUB_SHA}" --notes "${NOTES}")
+          else
+            args+=(--target "${GITHUB_SHA}" --generate-notes)
+          fi
+          gh release create "${TAG}" decky-task-manager.zip "${args[@]}"

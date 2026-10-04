@@ -52,7 +52,7 @@ Smoke-test updater replacement/restart on a Steam Deck before publishing a publi
 
 To create a new release, make sure you have the GitHub CLI installed and authenticated with `gh auth login`. Then run `pnpm run release` which will bump the version, run tests, build everything, package it into a ZIP, and create a new release on GitHub. Use `pnpm run release -- --private` to create a draft release for review before publishing it.
 
-Releases can also be published from GitHub Actions: bump the version in `package.json`, commit, then push an annotated tag that matches it (`git tag -a v0.1.20 -m "release notes" && git push origin v0.1.20`). The workflow runs the tests, builds the ZIP, and publishes the release using the tag message as the notes.
+Releases can also be published from GitHub Actions: bump the version in `package.json`, commit, then push an annotated tag that matches it (`git tag -a v0.1.20 -m "release notes" && git push origin v0.1.20`). The workflow runs the tests, builds the ZIP, and publishes the release using the tag message as the notes. You can also run the Release workflow by hand from the Actions tab on `main`. It tags the commit with the version in `package.json` and uses the notes you enter.
 
 ## TODO
 
