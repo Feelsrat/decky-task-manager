@@ -1,0 +1,334 @@
+/* Approximation of the Steam Deck Quick Access Menu. Sizes follow the Deck's 1280x800 screen. */
+:root {
+  --qam-width: 356px;
+  --rail-width: 52px;
+  --text: #dcdedf;
+  --muted: #8b929a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #0b0d10;
+  color: var(--text);
+  font-family: "Motiva Sans", Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.qam {
+  display: flex;
+  width: var(--qam-width);
+  height: 800px;
+  background: #0e141b;
+}
+
+html.tall .qam {
+  height: auto;
+  min-height: 800px;
+}
+
+.qam-rail {
+  width: var(--rail-width);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 8px;
+  background: #0a0e12;
+  color: #6b7480;
+  font-size: 18px;
+}
+
+.qam-rail-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.qam-rail-icon.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.qam-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #1c222a 0%, #151a20 100%);
+}
+
+.qam-header {
+  height: 48px;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.qam-back {
+  font-size: 22px;
+  color: var(--muted);
+}
+
+.mock-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+
+.qam-content {
+  flex: 1;
+  overflow-y: auto;
+  padding-bottom: 24px;
+}
+
+html.tall .qam-content {
+  overflow: visible;
+}
+
+/* ---- PanelSection ---- */
+.mock-panel-section {
+  padding: 0 14px;
+}
+
+.mock-panel-section-title {
+  padding: 14px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #b8bcbf;
+}
+
+/* ---- Field ---- */
+.mock-field {
+  position: relative;
+  margin: 0 -8px;
+  padding: 10px 8px;
+  border-radius: 3px;
+}
+
+.mock-field.sep-standard::after,
+.mock-field.sep-thick::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.mock-field.sep-thick::after {
+  height: 2px;
+}
+
+.mock-field[data-nav-leaf] {
+  cursor: pointer;
+}
+
+.mock-field.highlight.gpfocus {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.mock-field.gpfocus {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+
+.mock-field-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mock-field-main.below {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mock-field-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text);
+  overflow: hidden;
+}
+
+.mock-field-children {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.mock-field-description {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+/* ---- DialogButton: Steam gives these a min-width, which plugin code has to override ---- */
+.mock-dialog-button {
+  min-width: 160px;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 2px;
+  background: #3d4450;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.mock-dialog-button:hover:not(:disabled) {
+  background: #4b5361;
+}
+
+.mock-dialog-button.gpfocus {
+  background: #dcdedf;
+  color: #0e141b;
+}
+
+.mock-dialog-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mock-dialog-button.primary {
+  background: #1a9fff;
+  color: #fff;
+}
+
+.mock-dialog-button.destructive {
+  background: #c0392b;
+  color: #fff;
+}
+
+.mock-dialog-button.primary.gpfocus,
+.mock-dialog-button.destructive.gpfocus {
+  box-shadow: 0 0 0 2px #fff;
+}
+
+/* ---- Toggle ---- */
+.mock-toggle {
+  width: 40px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 10px;
+  background: #4d5361;
+  transition: background 0.15s;
+}
+
+.mock-toggle.on {
+  background: #1a9fff;
+}
+
+.mock-toggle-knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+
+.mock-toggle.on .mock-toggle-knob {
+  transform: translateX(20px);
+}
+
+/* ---- Modal ---- */
+.mock-modal-layer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 10;
+}
+
+.mock-modal {
+  width: 330px;
+  padding: 22px 22px 18px;
+  border-radius: 4px;
+  background: #23262e;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+.mock-modal-title {
+  font-size: 19px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.mock-modal-body {
+  margin-top: 10px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #b8bcbf;
+}
+
+.mock-modal-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.mock-modal-buttons .mock-dialog-button {
+  min-width: 0;
+}
+
+/* ---- Toasts ---- */
+.mock-toasts {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 300px;
+  z-index: 20;
+}
+
+.mock-toast {
+  padding: 10px 12px;
+  border-left: 3px solid #1a9fff;
+  border-radius: 3px;
+  background: #2a2f38;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.mock-toast.critical {
+  border-left-color: #ff5f57;
+}
+
+.mock-toast-title {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.mock-toast-body {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}

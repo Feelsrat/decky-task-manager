@@ -9,7 +9,9 @@
     "test": "node scripts/test.js",
     "test:backend": "python -m unittest tests.test_backend_mocks",
     "test:types": "tsc --noEmit --skipLibCheck",
-    "release": "node scripts/release.js"
+    "release": "node scripts/release.js",
+    "preview": "node scripts/preview.mjs",
+    "preview:shots": "node scripts/preview.mjs shots"
   },
   "repository": {
     "type": "git",
@@ -37,6 +39,10 @@
     "@types/react-dom": "19.1.1",
     "@types/webpack": "^5.28.5",
     "adm-zip": "^0.5.10",
+    "esbuild": "^0.28.2",
+    "playwright-core": "1.56.1",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
     "rollup": "^4.53.3",
     "typescript": "^5.6.2"
   },
@@ -51,6 +57,9 @@
         "react",
         "react-dom"
       ]
-    }
+    },
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

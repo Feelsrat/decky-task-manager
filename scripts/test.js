@@ -10,6 +10,7 @@
  * - Runs lightweight backend mock tests
  * - Verifies TypeScript build
  * - Verifies TypeScript project types
+ * - Verifies the browser QAM preview still builds against the mocks
  * - Validates required files exist
  *
  * Usage:
@@ -189,6 +190,18 @@ function testTypeScriptTypes() {
   }
 }
 
+function testPreviewBuild() {
+  console.log('\nChecking QAM preview build...');
+  try {
+    runCommand(process.execPath, [join(rootDir, 'scripts', 'preview.mjs'), 'build']);
+    console.log('OK: Preview builds with mocked Decky APIs');
+  } catch (error) {
+    console.error('FAIL: Preview build failed:');
+    console.error(error.stderr?.toString() || error.message);
+    hasErrors = true;
+  }
+}
+
 function testRequiredFiles() {
   console.log('\nChecking required files...');
 
@@ -216,6 +229,7 @@ function runAllTests() {
   testBackendMocks();
   testTypeScriptBuild();
   testTypeScriptTypes();
+  testPreviewBuild();
   testRequiredFiles();
 
   console.log('\n' + '='.repeat(50));
